@@ -1,0 +1,5 @@
+I want to create a database with history data score. For example in June 2011 the keyword had score 102. In July 2020 the same word had score
+
+In this article, we'll break down the public schema, its pros and cons, how PostgreSQL resolves object names using the search path, and most
+
+Best practices for database schema design. Common PostgreSQL pitfalls to avoid. How to optimize queries in PostgreSQL. Differences between

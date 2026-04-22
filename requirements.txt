@@ -1,0 +1,35 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
+# FastAPI is the async REST API framework for NexusFlow's HTTP layer.
+fastapi==0.115.12
+
+# ASGI server that runs the FastAPI application.
+# [standard] pulls in httptools and uvloop for better performance.
+uvicorn[standard]==0.34.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+# SQLAlchemy ORM with asyncio support for async database access.
+sqlalchemy[asyncio]==2.0.40
+
+# Async PostgreSQL driver used by SQLAlchemy at runtime.
+asyncpg==0.30.0
+
+# Sync PostgreSQL driver kept for Alembic migrations and scripts.
+psycopg2-binary==2.9.10
+
+# ── Validation & settings ─────────────────────────────────────────────────────
+# Data validation library used by FastAPI for request/response models.
+pydantic==2.11.3
+
+# Reads typed application settings from environment variables and .env files.
+pydantic-settings==2.8.1
+
+# Loads .env files into the environment (used by pydantic-settings internally).
+python-dotenv==1.1.0
+
+# ── HTTP client ───────────────────────────────────────────────────────────────
+# Async HTTP client used by agents to call external APIs and LLM endpoints.
+httpx==0.28.1
+
+# ── Web search ────────────────────────────────────────────────────────────────
+# Tavily client for the web search tool available to research agents.
+tavily-python==0.5.1
