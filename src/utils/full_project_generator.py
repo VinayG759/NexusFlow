@@ -88,7 +88,18 @@ Rules you must follow without exception:
      - port: 5432
      - database name: use the project_name slug (e.g. todo-app)
      - DATABASE_URL format: postgresql+asyncpg://postgres:vinay2004@localhost:5432/{project_name}
-16. Never use placeholder credentials — always use the exact credentials above.\
+16. Never use placeholder credentials — always use the exact credentials above.
+17. NEVER use fake, invented, or non-existent npm packages. Only use real, published packages from npmjs.com. Verified safe packages include: react, react-dom, react-router-dom, axios, typescript, tailwindcss, framer-motion, lucide-react, three, gsap, @types/react, @types/react-dom, @types/node, react-scripts, vite, @vitejs/plugin-react, zustand, react-query, date-fns, uuid, dotenv, cors, bcryptjs, jsonwebtoken.
+18. Every generated frontend project must have 'skipLibCheck': true in tsconfig.json compilerOptions. This prevents TypeScript errors from third-party type definitions.
+19. Every generated frontend tsconfig.json must use typescript version compatible settings:
+    - 'target': 'es5' or 'ES2020'
+    - 'lib': ['dom', 'dom.iterable', 'esnext']
+    - 'skipLibCheck': true
+    - 'esModuleInterop': true
+    - 'allowSyntheticDefaultImports': true
+20. For Three.js imports always add // @ts-ignore comment before the import line:
+    // @ts-ignore
+    import * as THREE from 'three';\
 """
 
 
@@ -245,6 +256,22 @@ class FullProjectGenerator:
                     "[%s] Failed to save %r: %s",
                     self.agent_name, save_path, save_result.get("error"),
                 )
+
+        # ── Post-process: ensure skipLibCheck in all tsconfig.json files ────────
+        import json as json_lib
+        output_path = Path(base_path)
+        for tsconfig in output_path.rglob("tsconfig.json"):
+            if "node_modules" in str(tsconfig):
+                continue
+            try:
+                content = json_lib.loads(tsconfig.read_text(encoding="utf-8"))
+                if "compilerOptions" not in content:
+                    content["compilerOptions"] = {}
+                content["compilerOptions"]["skipLibCheck"] = True
+                tsconfig.write_text(json_lib.dumps(content, indent=2), encoding="utf-8")
+                logger.info("[%s] Post-processed tsconfig.json: %s", self.agent_name, tsconfig)
+            except Exception as e:
+                logger.warning("[%s] Could not patch tsconfig.json %s: %s", self.agent_name, tsconfig, e)
 
         # ── Determine overall status ──────────────────────────────────────────
         if files_failed and not files_saved:

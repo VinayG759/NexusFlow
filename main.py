@@ -98,6 +98,14 @@ class AnalyzeRequest(BaseModel):
     problem_statement: str
 
 
+class PlanRequest(BaseModel):
+    """Request body for the POST /plan endpoint."""
+    problem_statement: str
+    use_threejs: bool = False
+    use_gsap: bool = False
+    use_reactbits: bool = False
+
+
 # ── Running-process store ─────────────────────────────────────────────────────
 # Maps project_path → {backend: Process|None, frontend: Process|None, ...}
 
@@ -533,6 +541,83 @@ async def analyze(request: AnalyzeRequest) -> dict:
         return {"status": "error", "message": str(exc)}
 
 
+@app.post("/plan")
+async def plan(request: PlanRequest) -> dict:
+    """Generate a visual project plan from a problem statement.
+
+    Makes a single LLM call to produce a structured JSON plan including tech
+    stack, file structure, complexity estimate, and required APIs.
+
+    Args:
+        request: JSON body with ``problem_statement`` and optional feature flags.
+
+    Returns:
+        ``{status, project_name, description, tech_stack, file_structure,
+           apis_required, estimated_files, complexity, estimated_build_time}``
+    """
+    logger.info("POST /plan — problem=%r", request.problem_statement[:120])
+
+    system_prompt = (
+        "You are a senior software architect. Analyze the problem statement and return ONLY a valid JSON object "
+        "with this exact structure — no markdown, no explanation, no text outside the JSON:\n"
+        "{\n"
+        '  "project_name": "lowercase-slug",\n'
+        '  "description": "one sentence describing the project",\n'
+        '  "tech_stack": {\n'
+        '    "backend": ["FastAPI", "SQLAlchemy", "asyncpg"],\n'
+        '    "frontend": ["React 18", "TypeScript", "TailwindCSS"],\n'
+        '    "database": ["PostgreSQL"],\n'
+        '    "devops": ["Docker", "Docker Compose"]\n'
+        "  },\n"
+        '  "file_structure": [\n'
+        '    {"path": "backend", "description": "FastAPI backend", "type": "folder"},\n'
+        '    {"path": "backend/main.py", "description": "Application entry point", "type": "file"}\n'
+        "  ],\n"
+        '  "apis_required": ["OpenWeatherMap API"],\n'
+        '  "estimated_files": 18,\n'
+        '  "complexity": "medium",\n'
+        '  "estimated_build_time": "2-3 minutes"\n'
+        "}\n"
+        "complexity must be exactly one of: simple, medium, complex."
+    )
+
+    user_prompt = f"Project requirement: {request.problem_statement}"
+    if request.use_threejs:
+        user_prompt += "\nUse Three.js for 3D visuals."
+    if request.use_gsap:
+        user_prompt += "\nUse GSAP for animations."
+    if request.use_reactbits:
+        user_prompt += "\nUse ReactBits for UI components."
+    user_prompt += "\n\nReturn ONLY the JSON object."
+
+    try:
+        llm_result = await api_connector.call_groq(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+        )
+
+        if llm_result["status"] != "success":
+            return {"status": "error", "message": llm_result.get("error", "LLM call failed")}
+
+        raw = llm_result["content"].strip()
+        for fence in ("```json", "```"):
+            if raw.startswith(fence):
+                raw = raw[len(fence):]
+                break
+        if raw.endswith("```"):
+            raw = raw[:-3]
+
+        plan_data = json.loads(raw.strip())
+        return {"status": "success", **plan_data}
+
+    except json.JSONDecodeError as exc:
+        logger.error("POST /plan — JSON parse error: %s", exc)
+        return {"status": "error", "message": f"JSON parse error: {exc}"}
+    except Exception as exc:
+        logger.exception("POST /plan unhandled error: %s", exc)
+        return {"status": "error", "message": str(exc)}
+
+
 @app.post("/run-project")
 async def run_project(request: RunProjectRequest) -> dict:
     """Start a generated project's backend and/or frontend in the background.
@@ -586,7 +671,7 @@ async def run_project(request: RunProjectRequest) -> dict:
             logger.info("POST /run-project — installing backend deps in %s", backend_dir)
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", str(req_file)],
+                [sys.executable, "-m", "pip", "install", "-q", "-r", str(req_file)],
                 cwd=str(backend_dir),
                 shell=False,
                 timeout=180,
@@ -643,14 +728,18 @@ async def run_project(request: RunProjectRequest) -> dict:
     # ── Frontend ──────────────────────────────────────────────────────────────
     if has_frontend:
         frontend_dir = project / "frontend"
-        logger.info("POST /run-project — running npm install in %s", frontend_dir)
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: subprocess.run(
-            [npm_path, "install", "--legacy-peer-deps"],
-            cwd=str(frontend_dir),
-            shell=False,
-            timeout=180,
-        ))
+        node_modules = frontend_dir / "node_modules"
+        if not node_modules.exists():
+            logger.info("POST /run-project — running npm install in %s", frontend_dir)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: subprocess.run(
+                [npm_path, "install", "--legacy-peer-deps"],
+                cwd=str(frontend_dir),
+                shell=False,
+                timeout=180,
+            ))
+        else:
+            logger.info("POST /run-project — node_modules exists, skipping npm install")
 
         env = {**os.environ, "PORT": str(request.port_frontend)}
         logger.info(
@@ -794,7 +883,10 @@ async def list_projects() -> list[dict]:
             if not entry.is_dir():
                 continue
             try:
-                file_count = sum(1 for f in entry.rglob("*") if f.is_file())
+                file_count = sum(
+                    1 for f in entry.rglob("*")
+                    if f.is_file() and "node_modules" not in f.parts and "__pycache__" not in f.parts
+                )
             except Exception as scan_exc:
                 logger.warning("GET /list-projects — could not count files in %s: %s", entry, scan_exc)
                 file_count = 0
