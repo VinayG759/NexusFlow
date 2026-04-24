@@ -37,3 +37,11 @@ groq==0.13.1
 # ── Web search ────────────────────────────────────────────────────────────────
 # Tavily client for the web search tool available to research agents.
 tavily-python==0.5.1
+
+# ── File utilities ────────────────────────────────────────────────────────────
+# Async file I/O used by file_agent and other utilities.
+aiofiles==24.1.0
+
+# ── Reload watcher ────────────────────────────────────────────────────────────
+# Used by uvicorn --reload for efficient file change detection.
+watchfiles==1.0.4

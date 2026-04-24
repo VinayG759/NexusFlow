@@ -37,8 +37,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "NexusFlow"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
-    # Default directory where NexusFlow saves all generated projects
-    OUTPUT_DIRECTORY: str = "C:\\Users\\Priya\\OneDrive\\Desktop\\nexusflowbuiltprojects"
+    # Default directory where NexusFlow saves all generated projects.
+    # On Render and other cloud platforms this is overridden via the
+    # OUTPUT_DIRECTORY environment variable (typically /tmp/nexusflowbuiltprojects).
+    OUTPUT_DIRECTORY: str = "/tmp/nexusflowbuiltprojects"
 
     # ── Database ──────────────────────────────────────────────────────────────
     # PostgreSQL connection settings used by SQLAlchemy.
