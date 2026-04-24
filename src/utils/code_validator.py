@@ -13,6 +13,7 @@ Usage::
     result = code_validator.check_imports("weather-app/backend/routes.py")
 """
 
+import sys
 from pathlib import Path
 
 from src.tools.code_executor import CodeExecutorTool
@@ -68,7 +69,7 @@ class CodeValidator:
                 }
         """
         logger.info("Validating Python syntax: %r", file_path)
-        result = self._executor.execute_command(f"py -3.11 -m py_compile {file_path}")
+        result = self._executor.execute_command(f"{sys.executable} -m py_compile {file_path}")
 
         if result["exit_code"] == 0:
             logger.info("Syntax OK: %r", file_path)
@@ -161,7 +162,7 @@ class CodeValidator:
         original_timeout = self._executor.timeout
         self._executor.timeout = timeout
         try:
-            result = self._executor.execute_command(f"py -3.11 {file_path}")
+            result = self._executor.execute_command(f"{sys.executable} {file_path}")
         finally:
             self._executor.timeout = original_timeout
 
@@ -207,7 +208,7 @@ class CodeValidator:
         logger.info("AST-checking imports in: %r", file_path)
         # Use escaped braces so the path is embedded as a string literal.
         escaped = file_path.replace("\\", "\\\\").replace("'", "\\'")
-        command = f"py -3.11 -c \"import ast; ast.parse(open('{escaped}').read())\""
+        command = f"{sys.executable} -c \"import ast; ast.parse(open('{escaped}').read())\""
         result = self._executor.execute_command(command)
 
         if result["exit_code"] == 0:

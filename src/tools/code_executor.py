@@ -18,14 +18,14 @@ Security note:
 """
 
 import subprocess
+import sys
 import time
 
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_PYTHON = "py"
-_PYTHON_VERSION = "-3.11"
+_PYTHON = sys.executable
 
 
 class CodeExecutorTool:
@@ -135,7 +135,7 @@ class CodeExecutorTool:
             # result["stdout"] == "1024\\n"
         """
         logger.info("Executing Python code (timeout=%ds).", self.timeout)
-        result = self._run([_PYTHON, _PYTHON_VERSION, "-c", code])
+        result = self._run([_PYTHON, "-c", code])
         logger.info(
             "Python execution finished — status=%s exit_code=%s time=%.4fs.",
             result["status"], result["exit_code"], result["execution_time"],
@@ -194,7 +194,7 @@ class CodeExecutorTool:
                 }
         """
         logger.info("Installing package: %r", package_name)
-        result = self._run([_PYTHON, _PYTHON_VERSION, "-m", "pip", "install", package_name])
+        result = self._run([_PYTHON, "-m", "pip", "install", package_name])
         if result["status"] == "success":
             message = f"Package '{package_name}' installed successfully."
         elif result["status"] == "timeout":
