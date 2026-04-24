@@ -30,6 +30,10 @@ python-dotenv==1.1.0
 # Async HTTP client used by agents to call external APIs and LLM endpoints.
 httpx==0.28.1
 
+# ── LLM clients ───────────────────────────────────────────────────────────────
+# Official Groq SDK used by api_connector to call Groq-hosted LLMs.
+groq==0.13.1
+
 # ── Web search ────────────────────────────────────────────────────────────────
 # Tavily client for the web search tool available to research agents.
 tavily-python==0.5.1
