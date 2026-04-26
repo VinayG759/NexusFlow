@@ -12,21 +12,25 @@ Or via uvicorn::
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 """
 
+import io
 import json
-import sys
 import asyncio
+import httpx
+import zipfile
 
 import os
-import shutil
-import subprocess
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import func as sql_func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.agents.api_agent import api_agent
 from src.agents.builder_agent import builder_agent
@@ -35,11 +39,18 @@ from src.agents.file_agent import file_agent
 from src.agents.orchestrator import OrchestratorAgent
 from src.agents.research_agent import research_agent
 from src.config.settings import settings
-from src.database.connection import init_db
+from src.database.connection import AsyncSessionFactory, init_db
+from src.database.models import Project, ProjectFile
 from src.tools.api_connector import api_connector
 from src.utils.logger import get_logger
+
+try:
+    from src.tools.web_search import web_search_tool as _web_search_tool
+    _web_search_available = True
+except Exception:
+    _web_search_tool = None  # type: ignore[assignment]
+    _web_search_available = False
 from src.utils.api_analyzer import api_analyzer
-from src.utils.fix_loop import fix_loop
 from src.utils.full_project_generator import full_project_generator
 from src.utils.project_generator import project_generator
 from src.utils.task_executor import task_executor
@@ -80,18 +91,15 @@ class BuildRequest(BaseModel):
     auto_fix: bool = True
     output_directory: str = ""
     api_keys: dict[str, str] = {}
+    additional_context: str = ""
+    reference_context: str = ""
 
 
-class RunProjectRequest(BaseModel):
-    """Request body for the POST /run-project endpoint."""
-    project_path: str
-    port_backend: int = 8002
-    port_frontend: int = 3001
-
-
-class StopProjectRequest(BaseModel):
-    """Request body for the POST /stop-project endpoint."""
-    project_path: str
+class ReferenceRequest(BaseModel):
+    """Request body for the POST /analyze-reference endpoint."""
+    url: str | None = None
+    problem_statement: str
+    base64_image: str | None = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -107,10 +115,26 @@ class PlanRequest(BaseModel):
     use_reactbits: bool = False
 
 
-# ── Running-process store ─────────────────────────────────────────────────────
-# Maps project_path → {backend: Process|None, frontend: Process|None, ...}
+class ClarifyRequest(BaseModel):
+    """Request body for the POST /clarify endpoint."""
+    problem_statement: str
 
-_running_projects: dict[str, dict] = {}
+
+class DesignRequest(BaseModel):
+    """Request body for the POST /design endpoint."""
+    component_name: str
+    description: str
+    style_preferences: str = ""
+    framework: str = "react"
+    reference_context: str = ""
+
+
+class SaveComponentRequest(BaseModel):
+    """Request body for the POST /save-component endpoint."""
+    project_path: str
+    component_name: str
+    code: str
+    framework: str = "react"
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -154,6 +178,22 @@ app.add_middleware(
 )
 
 
+# ── DB dependency ─────────────────────────────────────────────────────────────
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Yield a transactional async database session for FastAPI endpoints."""
+    session: AsyncSession = AsyncSessionFactory()
+    try:
+        yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -185,8 +225,10 @@ async def list_agents() -> dict:
             {"name": "FileAgent",      "type": "FileAgent",         "status": "available"},
             {"name": "APIAgent",       "type": "APIAgent",          "status": "available"},
             {"name": "DeployAgent",    "type": "DeployAgent",       "status": "available"},
+            {"name": "UIDesignAgent",    "type": "UIDesignAgent",    "status": "available"},
+            {"name": "DebuggingAgent",   "type": "DebuggingAgent",   "status": "available"},
         ],
-        "total": 6,
+        "total": 8,
     }
 
 
@@ -348,7 +390,7 @@ async def generate(request: GenerateRequest) -> dict:
 
 
 @app.post("/build")
-async def build(request: BuildRequest) -> dict:
+async def build(request: BuildRequest, db: AsyncSession = Depends(get_db)) -> dict:
     """Generate a complete full-stack project in a single LLM call.
 
     Delegates to :class:`~src.utils.full_project_generator.FullProjectGenerator`
@@ -393,95 +435,42 @@ async def build(request: BuildRequest) -> dict:
         "threejs": request.use_threejs,
         "gsap": request.use_gsap,
         "reactbits": request.use_reactbits,
+        "reference_context": request.reference_context,
     }
-    if request.output_directory.strip():
-        options["output_directory"] = request.output_directory.strip()
 
-    logger.info(
-        "POST /build — problem=%r options=%s auto_fix=%s",
-        request.problem_statement[:120], options, request.auto_fix,
-    )
+    problem = request.problem_statement
+    if request.additional_context.strip():
+        problem = f"{request.additional_context.strip()}\n\n{problem}"
+    if len(problem) > 3000:
+        problem = problem[:3000] + "..."
+
+    logger.info("POST /build — problem=%r options=%s", problem[:120], options)
 
     try:
-        result = await full_project_generator.generate(request.problem_statement, options)
-        files_saved: list[str] = result.get("files_saved", [])
-        files_failed: list[str] = result.get("files_failed", [])
-        project_name: str = result.get("project_name", "")
+        try:
+            result = await full_project_generator.generate(problem, options, db)
+        except Exception as gen_exc:
+            logger.exception("POST /build — generate() raised: %s", gen_exc)
+            return {"status": "error", "message": str(gen_exc), "project_name": "", "project_id": None, "total_files": 0, "setup_instructions": ""}
 
         logger.info(
-            "POST /build — status=%s project=%r saved=%d failed=%d",
-            result["status"], project_name, len(files_saved), len(files_failed),
+            "POST /build — status=%s project=%r id=%s total_files=%s",
+            result["status"], result.get("project_name"), result.get("project_id"), result.get("total_files"),
         )
-
-        response: dict = {
+        return {
             "status": result["status"],
-            "project_name": project_name,
-            "files_saved": files_saved,
-            "files_failed": files_failed,
-            "total_files": len(files_saved) + len(files_failed),
+            "message": result.get("error", ""),
+            "project_id": result.get("project_id"),
+            "project_name": result.get("project_name", ""),
+            "total_files": result.get("total_files", 0),
             "setup_instructions": result.get("setup_instructions", ""),
-            "env_variables": result.get("env_variables", []),
-            "actual_output_path": result.get("actual_output_path", ""),
-            "fix_status": None,
-            "attempts": None,
-            "fixes_applied": None,
-            "final_valid_files": None,
-            "final_invalid_files": None,
+            "debug_fixes_applied": result.get("debug_fixes_applied", 0),
+            "debug_remaining_errors": result.get("debug_remaining_errors", []),
         }
-
-        # ── Inject API keys into .env ─────────────────────────────────────────
-        if request.api_keys and files_saved:
-            output_path = Path(result.get("actual_output_path") or project_name)
-            env_example = output_path / ".env.example"
-            if not env_example.exists():
-                # Also check inside backend/ subdirectory
-                env_example = output_path / "backend" / ".env.example"
-
-            if env_example.exists():
-                lines = env_example.read_text(encoding="utf-8").splitlines()
-                injected: list[str] = []
-                for line in lines:
-                    matched = False
-                    for api_name, api_key in request.api_keys.items():
-                        if api_name.lower().replace(" ", "_") in line.lower():
-                            # Replace everything after the first '=' with the real key
-                            key_part = line.split("=", 1)[0]
-                            line = f"{key_part}={api_key}"
-                            matched = True
-                            logger.info(
-                                "POST /build — injected key for %r into %s",
-                                api_name, key_part.strip(),
-                            )
-                            break
-                    injected.append(line)
-
-                env_file = env_example.parent / ".env"
-                env_file.write_text("\n".join(injected), encoding="utf-8")
-                logger.info("POST /build — .env written to %s", env_file)
-            else:
-                logger.warning(
-                    "POST /build — api_keys provided but no .env.example found in %s", output_path,
-                )
-
-        if request.auto_fix and files_saved and project_name:
-            fix_path = result.get("actual_output_path") or project_name
-            logger.info("POST /build — running fix_loop on %r", fix_path)
-            fix_result = await fix_loop.run(fix_path)
-            response["fix_status"] = fix_result["status"]
-            response["attempts"] = fix_result["attempts"]
-            response["fixes_applied"] = fix_result["fixes_applied"]
-            response["final_valid_files"] = fix_result["final_valid_files"]
-            response["final_invalid_files"] = fix_result["final_invalid_files"]
-            logger.info(
-                "POST /build — fix_loop done: status=%s attempts=%d fixes=%d",
-                fix_result["status"], fix_result["attempts"], fix_result["fixes_applied"],
-            )
-
-        return response
 
     except Exception as exc:
         logger.exception("POST /build unhandled error: %s", exc)
-        return {"status": "error", "message": str(exc)}
+        return {"status": "error", "message": str(exc), "project_name": "", "project_id": None, "total_files": 0, "setup_instructions": ""}
 
 
 @app.post("/analyze")
@@ -620,291 +609,445 @@ async def plan(request: PlanRequest) -> dict:
         return {"status": "error", "message": str(exc)}
 
 
-@app.post("/run-project")
-async def run_project(request: RunProjectRequest) -> dict:
-    """Start a generated project's backend and/or frontend in the background.
+@app.post("/clarify")
+async def clarify(request: ClarifyRequest) -> dict:
+    """Generate clarifying questions for a problem statement.
 
-    Detects which components exist (FastAPI backend, React frontend) and
-    launches each as a subprocess.Popen process.  Processes are stored in
-    ``_running_projects`` so they can be stopped later via ``POST /stop-project``.
-
-    Uses subprocess.Popen (not asyncio.create_subprocess_exec) for Windows
-    compatibility when running under uvicorn.
+    Makes a single LLM call to produce 3-5 structured questions that help
+    the user refine their requirements before the build pipeline runs.
 
     Args:
-        request: JSON body with ``project_path``, ``port_backend``,
-            ``port_frontend``.
+        request: JSON body with ``problem_statement``.
 
     Returns:
-        ``{status, project_path, backend_url, frontend_url,
-           backend_running, frontend_running}``
+        ``{status, questions}`` where questions is a list of question objects.
     """
+    logger.info("POST /clarify — problem=%r", request.problem_statement[:120])
+
+    system_prompt = (
+        "You are a senior software architect. Analyze the problem statement and generate 3-5 clarifying questions "
+        "that would help build a better product. Return ONLY a valid JSON array of objects with this exact structure "
+        "— no markdown, no explanation, no text outside the JSON:\n"
+        "[\n"
+        "  {\n"
+        '    "id": "auth_type",\n'
+        '    "question": "What type of authentication do you need?",\n'
+        '    "type": "single_select",\n'
+        '    "options": ["No auth", "Email/Password", "Google OAuth", "JWT tokens"],\n'
+        '    "default": "Email/Password",\n'
+        '    "importance": "required"\n'
+        "  }\n"
+        "]\n"
+        "type must be exactly one of: single_select, multi_select, text\n"
+        "importance must be exactly one of: required, optional\n"
+        "options must be a list of strings for single_select and multi_select, or null for text\n"
+        "Focus on: authentication needs, UI complexity, specific features, third-party integrations, deployment target.\n"
+        "If the problem statement mentions a reference website or image has already been provided, do NOT ask for website links or design references again. "
+        "Focus questions on functionality, features, and technical requirements only."
+    )
+
+    user_prompt = (
+        f"Problem statement: {request.problem_statement}\n\n"
+        "Return ONLY the JSON array of clarifying questions."
+    )
+
+    try:
+        llm_result = await api_connector.call_groq(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+        )
+
+        if llm_result["status"] != "success":
+            return {"status": "error", "message": llm_result.get("error", "LLM call failed")}
+
+        raw = llm_result["content"].strip()
+        for fence in ("```json", "```"):
+            if raw.startswith(fence):
+                raw = raw[len(fence):]
+                break
+        if raw.endswith("```"):
+            raw = raw[:-3]
+
+        questions = json.loads(raw.strip())
+        return {"status": "success", "questions": questions}
+
+    except json.JSONDecodeError as exc:
+        logger.error("POST /clarify — JSON parse error: %s", exc)
+        return {"status": "error", "message": f"JSON parse error: {exc}"}
+    except Exception as exc:
+        logger.exception("POST /clarify unhandled error: %s", exc)
+        return {"status": "error", "message": str(exc)}
+
+
+_GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+_GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+_ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+_ANTHROPIC_API_VERSION = "2023-06-01"
+_DESIGN_MODEL = "claude-sonnet-4-20250514"
+
+
+@app.post("/analyze-reference")
+async def analyze_reference(request: ReferenceRequest) -> dict:
+    """Analyze a reference website or image for its design system using LLM.
+
+    Accepts either a URL (fetched via Tavily then LLM-analyzed) or a base64
+    image (sent to Groq's vision model, with text-only fallback).
+
+    Args:
+        request: JSON body with ``url``, ``base64_image``, ``problem_statement``.
+
+    Returns:
+        ``{status, reference_context, analysis, summary}`` on success,
+        or ``{status, message}`` on failure.
+    """
+    logger.info("POST /analyze-reference — url=%r has_image=%s", request.url, bool(request.base64_image))
+
+    if not request.url and not request.base64_image:
+        return {"status": "error", "message": "Provide a url or base64_image."}
+
+    system_prompt = (
+        "You are a UI/UX analyst. Analyze the provided design and extract:\n"
+        "1. Color palette (primary, secondary, accent colors as hex or descriptive names)\n"
+        "2. Typography style (font families, weights, sizing)\n"
+        "3. Layout style (minimal, dense, card-based, sidebar, etc)\n"
+        "4. Animation style (subtle, heavy, none, micro-interactions)\n"
+        "5. Component patterns (navigation style, card style, button style)\n"
+        "6. Overall aesthetic (dark, light, glassmorphism, neumorphism, flat, etc)\n"
+        "Return ONLY a valid JSON object with these exact keys: "
+        "colors, typography, layout, animations, components, aesthetic, summary\n"
+        "No markdown, no explanation, no text outside the JSON."
+    )
+
+    raw_content: str | None = None
+
+    # ── Image path ────────────────────────────────────────────────────────────
+    if request.base64_image:
+        raw_b64 = request.base64_image
+        mime_type = "image/jpeg"
+        if raw_b64.startswith("data:"):
+            header, _, raw_b64 = raw_b64.partition(",")
+            mime_type = header.removeprefix("data:").removesuffix(";base64") or mime_type
+
+        if settings.GROQ_API_KEY:
+            try:
+                vision_messages: list[dict] = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "Analyze this UI design image and extract the design system. Return ONLY the JSON object."},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{raw_b64}"}},
+                    ]},
+                ]
+                async with httpx.AsyncClient(timeout=30.0) as vision_client:
+                    resp = await vision_client.post(
+                        _GROQ_CHAT_URL,
+                        headers={
+                            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={"model": _GROQ_VISION_MODEL, "messages": vision_messages, "max_tokens": 1024},
+                    )
+                if resp.status_code == 200:
+                    raw_content = resp.json()["choices"][0]["message"]["content"]
+                    logger.info("POST /analyze-reference — vision call succeeded (%d chars)", len(raw_content))
+                else:
+                    logger.warning("POST /analyze-reference — vision call failed (%d): %s", resp.status_code, resp.text[:200])
+            except Exception as exc:
+                logger.warning("POST /analyze-reference — vision call error: %s", exc)
+
+        if raw_content is None:
+            llm_result = await api_connector.call_groq(
+                prompt="A UI design image was uploaded for analysis. Provide a comprehensive design system analysis based on common modern UI patterns. Return ONLY the JSON object.",
+                system_prompt=system_prompt,
+            )
+            if llm_result["status"] == "success":
+                raw_content = llm_result["content"]
+            else:
+                return {"status": "error", "message": llm_result.get("error", "LLM call failed")}
+
+    # ── URL path ──────────────────────────────────────────────────────────────
+    else:
+        web_content = ""
+        if request.url and _web_search_available and _web_search_tool is not None:
+            try:
+                loop = asyncio.get_event_loop()
+                search_result = await loop.run_in_executor(
+                    None, _web_search_tool.search_and_summarize, request.url
+                )
+                web_content = search_result.get("summary", "")
+                logger.info("POST /analyze-reference — fetched %d chars of web content", len(web_content))
+            except Exception as exc:
+                logger.warning("POST /analyze-reference — web search failed: %s", exc)
+
+        if not web_content:
+            web_content = f"Website URL: {request.url}\nProject context: {request.problem_statement}"
+
+        user_prompt = (
+            f"Website URL: {request.url}\n\n"
+            f"Website content:\n{web_content[:3000]}\n\n"
+            "Return ONLY the JSON object."
+        )
+        llm_result = await api_connector.call_groq(prompt=user_prompt, system_prompt=system_prompt)
+        if llm_result["status"] != "success":
+            return {"status": "error", "message": llm_result.get("error", "LLM call failed")}
+        raw_content = llm_result["content"]
+
+    if not raw_content:
+        return {"status": "error", "message": "LLM returned no content."}
+
+    try:
+        raw = raw_content.strip()
+        for fence in ("```json", "```"):
+            if raw.startswith(fence):
+                raw = raw[len(fence):]
+                break
+        if raw.endswith("```"):
+            raw = raw[:-3]
+
+        analysis = json.loads(raw.strip())
+
+        source_label = (
+            "image upload"
+            if request.base64_image and not request.url
+            else f"({request.url})"
+        )
+        reference_context = (
+            f"Reference design analysis {source_label}:\n"
+            f"- Colors: {analysis.get('colors', 'N/A')}\n"
+            f"- Typography: {analysis.get('typography', 'N/A')}\n"
+            f"- Layout: {analysis.get('layout', 'N/A')}\n"
+            f"- Animations: {analysis.get('animations', 'N/A')}\n"
+            f"- Components: {analysis.get('components', 'N/A')}\n"
+            f"- Aesthetic: {analysis.get('aesthetic', 'N/A')}\n"
+            f"Summary: {analysis.get('summary', 'N/A')}"
+        )
+
+        logger.info("POST /analyze-reference — analysis complete: aesthetic=%r", analysis.get("aesthetic"))
+        return {
+            "status": "success",
+            "reference_context": reference_context,
+            "analysis": analysis,
+            "summary": analysis.get("summary", ""),
+        }
+
+    except json.JSONDecodeError as exc:
+        logger.error("POST /analyze-reference — JSON parse error: %s", exc)
+        return {"status": "error", "message": f"JSON parse error: {exc}"}
+    except Exception as exc:
+        logger.exception("POST /analyze-reference unhandled error: %s", exc)
+        return {"status": "error", "message": str(exc)}
+
+
+@app.get("/projects")
+async def get_projects(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """List all generated projects from the database."""
+    stmt = (
+        select(Project, sql_func.count(ProjectFile.id).label("file_count"))
+        .outerjoin(ProjectFile, ProjectFile.project_id == Project.id)
+        .group_by(Project.id)
+        .order_by(Project.created_at.desc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "id": row[0].id,
+            "name": row[0].name,
+            "description": row[0].description,
+            "status": row[0].status,
+            "created_at": row[0].created_at.isoformat(),
+            "file_count": row[1],
+        }
+        for row in rows
+    ]
+
+
+@app.get("/projects/{project_id}")
+async def get_project(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """Return a single project with all its files."""
+    stmt = select(Project).options(selectinload(Project.files)).where(Project.id == project_id)
+    project = (await db.execute(stmt)).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {
+        "id": project.id,
+        "name": project.name,
+        "description": project.description,
+        "status": project.status,
+        "setup_instructions": project.setup_instructions,
+        "created_at": project.created_at.isoformat(),
+        "files": [
+            {"id": f.id, "path": f.file_path, "content": f.content, "file_type": f.file_type}
+            for f in project.files
+        ],
+    }
+
+
+@app.get("/projects/{project_id}/files")
+async def get_project_files(project_id: int, db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """Return all files for a project (without full project metadata)."""
+    stmt = select(Project).options(selectinload(Project.files)).where(Project.id == project_id)
+    project = (await db.execute(stmt)).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return [
+        {"id": f.id, "file_path": f.file_path, "content": f.content, "file_type": f.file_type}
+        for f in project.files
+    ]
+
+
+@app.get("/projects/{project_id}/download")
+async def download_project(project_id: int, db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+    """Stream a ZIP archive containing all project files."""
+    stmt = select(Project).options(selectinload(Project.files)).where(Project.id == project_id)
+    project = (await db.execute(stmt)).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in project.files:
+            zf.writestr(f.file_path, f.content)
+    buf.seek(0)
+
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in project.name)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.zip"'},
+    )
+
+
+@app.delete("/projects/{project_id}")
+async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """Delete a project and all its files from the database."""
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    name = project.name
+    await db.delete(project)
+    await db.commit()
+    logger.info("DELETE /projects/%d — deleted project %r", project_id, name)
+    return {"status": "success", "message": f"Project '{name}' deleted"}
+
+
+@app.post("/design")
+async def design(request: DesignRequest) -> dict:
+    """Generate a UI component using the Anthropic Claude API.
+
+    Sends a single request to Claude with a design-focused system prompt and
+    returns the full component source code.
+
+    Args:
+        request: JSON body with ``component_name``, ``description``,
+            ``style_preferences``, ``framework``, and ``reference_context``.
+
+    Returns:
+        ``{status, component_name, code, framework}`` on success,
+        or ``{status, message}`` on failure.
+    """
+    logger.info(
+        "POST /design — component=%r framework=%r", request.component_name, request.framework,
+    )
+
+    if not settings.ANTHROPIC_API_KEY:
+        return {"status": "error", "message": "ANTHROPIC_API_KEY is not configured."}
+
+    system_prompt = (
+        "You are an expert UI/UX designer and React developer. Generate beautiful, production-ready UI components. "
+        "Always use TailwindCSS for styling. Make components visually stunning with proper animations, gradients, "
+        "and modern design patterns. Return ONLY the complete component code with no explanation."
+    )
+
+    ref_part = (
+        f"\nReference design context:\n{request.reference_context}"
+        if request.reference_context.strip()
+        else ""
+    )
+    user_prompt = (
+        f"Create a {request.framework} component called {request.component_name}.\n"
+        f"Description: {request.description}\n"
+        f"Style preferences: {request.style_preferences or 'modern dark theme'}"
+        f"{ref_part}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                _ANTHROPIC_MESSAGES_URL,
+                headers={
+                    "x-api-key": settings.ANTHROPIC_API_KEY,
+                    "anthropic-version": _ANTHROPIC_API_VERSION,
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": _DESIGN_MODEL,
+                    "max_tokens": 4096,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                },
+            )
+
+        if not resp.is_success:
+            logger.error("POST /design — Claude API error %d: %s", resp.status_code, resp.text[:300])
+            return {
+                "status": "error",
+                "message": f"Claude API error {resp.status_code}: {resp.text[:200]}",
+            }
+
+        data = resp.json()
+        code = data.get("content", [{}])[0].get("text", "")
+        logger.info("POST /design — generated %d chars for %r", len(code), request.component_name)
+        return {
+            "status": "success",
+            "component_name": request.component_name,
+            "code": code,
+            "framework": request.framework,
+        }
+
+    except Exception as exc:
+        logger.exception("POST /design unhandled error: %s", exc)
+        return {"status": "error", "message": str(exc)}
+
+
+@app.post("/save-component")
+async def save_component(request: SaveComponentRequest) -> dict:
+    """Save a generated component file into an existing project.
+
+    For React, writes to ``project/frontend/src/components/{Name}.tsx``.
+    For HTML, writes to ``project/frontend/public/{Name}.html``.
+
+    Args:
+        request: JSON body with ``project_path``, ``component_name``,
+            ``code``, and ``framework``.
+
+    Returns:
+        ``{status, saved_path}`` on success, ``{status, message}`` on failure.
+    """
+    logger.info(
+        "POST /save-component — project=%r component=%r framework=%r",
+        request.project_path, request.component_name, request.framework,
+    )
+
     project = Path(request.project_path)
     if not project.exists():
         return {"status": "error", "message": f"Project path does not exist: {request.project_path}"}
 
-    has_backend  = (project / "backend"  / "main.py").exists()
-    has_frontend = (project / "frontend" / "package.json").exists()
-
-    if not has_backend and not has_frontend:
-        return {
-            "status": "error",
-            "message": "Neither backend/main.py nor frontend/package.json found in the project.",
-        }
-
-    backend_proc:  subprocess.Popen | None = None
-    frontend_proc: subprocess.Popen | None = None
-    backend_url:   str | None = None
-    frontend_url:  str | None = None
-
-    npm_path = shutil.which("npm") or "npm"
-
-    # Windows: CREATE_NEW_PROCESS_GROUP lets us send Ctrl+Break to the child group
-    popen_flags: dict = {}
-    if sys.platform == "win32":
-        popen_flags["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-
-    # ── Backend ───────────────────────────────────────────────────────────────
-    if has_backend:
-        backend_dir = project / "backend"
-        req_file    = backend_dir / "requirements.txt"
-
-        if req_file.exists():
-            logger.info("POST /run-project — installing backend deps in %s", backend_dir)
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", "-r", str(req_file)],
-                cwd=str(backend_dir),
-                shell=False,
-                timeout=180,
-            ))
-
-        # ── Auto-create PostgreSQL database ───────────────────────────────────
-        try:
-            import psycopg2
-            from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-
-            env_file = backend_dir / ".env"
-            db_name = project.name.lower().replace("-", "_").replace(" ", "_")
-            if env_file.exists():
-                for line in env_file.read_text().splitlines():
-                    if line.startswith("DATABASE_URL"):
-                        url = line.split("=", 1)[-1].strip()
-                        db_name = url.split("/")[-1].split("?")[0]
-                        break
-            conn = psycopg2.connect(
-                dbname="postgres",
-                user="postgres",
-                password="vinay2004",
-                host="localhost",
-                port=5432,
-            )
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-            cur = conn.cursor()
-            cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
-            if not cur.fetchone():
-                cur.execute(f'CREATE DATABASE "{db_name}"')
-                logger.info("POST /run-project — created database: %s", db_name)
-            else:
-                logger.info("POST /run-project — database already exists: %s", db_name)
-            cur.close()
-            conn.close()
-        except Exception as db_exc:
-            logger.warning("POST /run-project — could not auto-create database: %s", db_exc)
-
-        logger.info(
-            "POST /run-project — starting uvicorn on :%d for %s",
-            request.port_backend, backend_dir,
-        )
-        backend_proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "main:app",
-             "--host", "0.0.0.0", "--port", str(request.port_backend)],
-            cwd=str(backend_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-            **popen_flags,
-        )
-        backend_url = f"http://localhost:{request.port_backend}"
-
-    # ── Frontend ──────────────────────────────────────────────────────────────
-    if has_frontend:
-        frontend_dir = project / "frontend"
-        node_modules = frontend_dir / "node_modules"
-        if not node_modules.exists():
-            logger.info("POST /run-project — running npm install in %s", frontend_dir)
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: subprocess.run(
-                [npm_path, "install", "--legacy-peer-deps"],
-                cwd=str(frontend_dir),
-                shell=False,
-                timeout=180,
-            ))
-        else:
-            logger.info("POST /run-project — node_modules exists, skipping npm install")
-
-        env = {**os.environ, "PORT": str(request.port_frontend)}
-        logger.info(
-            "POST /run-project — starting npm start on :%d for %s",
-            request.port_frontend, frontend_dir,
-        )
-        frontend_proc = subprocess.Popen(
-            [npm_path, "start"],
-            cwd=str(frontend_dir),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-            **popen_flags,
-        )
-        frontend_url = f"http://localhost:{request.port_frontend}"
-
-    # ── Store processes ───────────────────────────────────────────────────────
-    _running_projects[request.project_path] = {
-        "backend_proc":   backend_proc,
-        "frontend_proc":  frontend_proc,
-        "backend_url":    backend_url,
-        "frontend_url":   frontend_url,
-        "port_backend":   request.port_backend  if has_backend  else None,
-        "port_frontend":  request.port_frontend if has_frontend else None,
-    }
-
-    logger.info(
-        "POST /run-project — launched: backend=%s frontend=%s",
-        backend_url, frontend_url,
-    )
-    return {
-        "status":           "success",
-        "project_path":     request.project_path,
-        "backend_url":      backend_url,
-        "frontend_url":     frontend_url,
-        "backend_running":  backend_proc  is not None,
-        "frontend_running": frontend_proc is not None,
-    }
-
-
-@app.post("/stop-project")
-async def stop_project(request: StopProjectRequest) -> dict:
-    """Kill all running processes for a project.
-
-    Args:
-        request: JSON body with ``project_path``.
-
-    Returns:
-        ``{status, message}``
-    """
-    info = _running_projects.pop(request.project_path, None)
-    if info is None:
-        return {"status": "error", "message": f"No running project found for: {request.project_path}"}
-
-    stopped: list[str] = []
-    for key in ("backend_proc", "frontend_proc"):
-        proc: subprocess.Popen | None = info.get(key)
-        if proc is not None:
-            try:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                stopped.append(key.replace("_proc", ""))
-            except Exception as exc:
-                logger.warning("POST /stop-project — could not stop %s: %s", key, exc)
-
-    logger.info("POST /stop-project — stopped %s for %s", stopped, request.project_path)
-    return {
-        "status":  "success",
-        "message": f"Stopped {', '.join(stopped) or 'no processes'} for {request.project_path}",
-    }
-
-
-@app.get("/running-projects")
-async def running_projects() -> dict:
-    """Return all projects that have active background processes.
-
-    Returns:
-        ``{status, projects: list[{project_path, backend_url, frontend_url,
-           backend_running, frontend_running}], total: int}``
-    """
-    alive = []
-    for path, info in list(_running_projects.items()):
-        bp: subprocess.Popen | None = info.get("backend_proc")
-        fp: subprocess.Popen | None = info.get("frontend_proc")
-
-        backend_alive  = bp is not None and bp.poll() is None
-        frontend_alive = fp is not None and fp.poll() is None
-
-        if not backend_alive and not frontend_alive:
-            _running_projects.pop(path, None)
-            continue
-
-        alive.append({
-            "project_path":     path,
-            "backend_url":      info.get("backend_url"),
-            "frontend_url":     info.get("frontend_url"),
-            "backend_running":  backend_alive,
-            "frontend_running": frontend_alive,
-        })
-
-    return {"status": "ok", "projects": alive, "total": len(alive)}
-
-
-@app.get("/list-projects")
-async def list_projects() -> list[dict]:
-    """List all projects in the configured output directory.
-
-    Scans ``settings.OUTPUT_DIRECTORY``, enumerates every immediate
-    subdirectory, and counts the total number of files inside each one
-    recursively.
-
-    Returns:
-        A JSON array of objects::
-
-            [
-                {
-                    "name":       str,   // folder name
-                    "path":       str,   // absolute path
-                    "file_count": int    // total files (recursive)
-                },
-                ...
-            ]
-
-        Returns ``[]`` when the directory does not exist or is empty.
-    """
-    logger.info("GET /list-projects — scanning %s", settings.OUTPUT_DIRECTORY)
-    output_dir = Path(settings.OUTPUT_DIRECTORY)
-
-    if not output_dir.exists():
-        logger.warning("GET /list-projects — OUTPUT_DIRECTORY does not exist: %s", output_dir)
-        return []
+    slug = request.component_name.replace(" ", "").replace("-", "")
+    if request.framework == "react":
+        target_dir = project / "frontend" / "src" / "components"
+        save_path = target_dir / f"{slug}.tsx"
+    else:
+        target_dir = project / "frontend" / "public"
+        save_path = target_dir / f"{slug}.html"
 
     try:
-        projects: list[dict] = []
-        for entry in sorted(output_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            try:
-                file_count = sum(
-                    1 for f in entry.rglob("*")
-                    if f.is_file() and "node_modules" not in f.parts and "__pycache__" not in f.parts
-                )
-            except Exception as scan_exc:
-                logger.warning("GET /list-projects — could not count files in %s: %s", entry, scan_exc)
-                file_count = 0
-
-            projects.append({
-                "name":       entry.name,
-                "path":       str(entry.resolve()),
-                "file_count": file_count,
-            })
-
-        logger.info("GET /list-projects — found %d project(s)", len(projects))
-        return projects
-
+        target_dir.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(request.code, encoding="utf-8")
+        logger.info("POST /save-component — saved to %s", save_path)
+        return {"status": "success", "saved_path": str(save_path)}
     except Exception as exc:
-        logger.exception("GET /list-projects unhandled error: %s", exc)
-        return []
+        logger.exception("POST /save-component unhandled error: %s", exc)
+        return {"status": "error", "message": str(exc)}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

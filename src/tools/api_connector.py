@@ -246,6 +246,7 @@ class APIConnectorTool:
         model: str | None = None,
         max_retries: int = 3,
         retry_delay: float = 5.0,
+        max_tokens: int | None = None,
     ) -> dict:
         """Call the Groq inference API using an OpenAI-compatible chat endpoint.
 
@@ -297,7 +298,7 @@ class APIConnectorTool:
         body: dict = {
             "model": resolved_model,
             "messages": messages,
-            "max_tokens": _GROQ_DEFAULT_MAX_TOKENS,
+            "max_tokens": max_tokens if max_tokens is not None else _GROQ_DEFAULT_MAX_TOKENS,
         }
 
         delay = retry_delay
