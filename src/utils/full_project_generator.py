@@ -26,10 +26,179 @@ from src.agents.file_agent import file_agent
 from src.agents.ui_design_agent import ui_design_agent
 from src.config.settings import settings
 from src.database.models import Project, ProjectFile
+from src.rag.rag_retriever import rag_retriever
 from src.tools.api_connector import api_connector
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+TEMPLATE_FILES = {
+    "backend/main.py": """import os
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from database import init_db
+from routes import router
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    yield
+
+app = FastAPI(title="{project_name} API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(router, prefix="/api")
+
+@app.get("/")
+async def root():
+    return {{"message": "{project_name} API is running"}}
+
+@app.get("/health")
+async def health():
+    return {{"status": "ok"}}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
+""",
+
+    "backend/database.py": """import os
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:vinay2004@localhost:5432/{project_name}"
+)
+
+engine = create_async_engine(DATABASE_URL, echo=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+class Base(DeclarativeBase):
+    pass
+
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+""",
+
+    "backend/requirements.txt": """fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]
+asyncpg
+python-dotenv
+pydantic
+httpx
+""",
+
+    "backend/.env.example": """DATABASE_URL=postgresql+asyncpg://postgres:vinay2004@localhost:5432/{project_name}
+""",
+
+    "frontend/src/index.tsx": """import React from 'react';
+import ReactDOM from 'react-dom/client';
+import './index.css';
+import App from './App';
+
+const root = ReactDOM.createRoot(
+  document.getElementById('root') as HTMLElement
+);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+""",
+
+    "frontend/src/index.css": """* {{
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}}
+
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background-color: #ffffff;
+  color: #1a1a1a;
+}}
+
+a {{ text-decoration: none; color: inherit; }}
+button {{ cursor: pointer; border: none; outline: none; }}
+input, textarea, select {{ outline: none; font-family: inherit; }}
+""",
+
+    "frontend/tsconfig.json": """{{
+  "compilerOptions": {{
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
+  }},
+  "include": ["src"]
+}}""",
+
+    "frontend/index.html": """<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{project_name}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/index.tsx"></script>
+  </body>
+</html>""",
+
+    "frontend/vite.config.ts": """import {{ defineConfig }} from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({{
+  plugins: [react()],
+  server: {{
+    port: 5173,
+    proxy: {{
+      '/api': {{
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      }}
+    }}
+  }},
+}})
+""",
+
+    "frontend/src/declarations.d.ts": """declare module '*.css';
+declare module '*.svg';
+declare module '*.png';
+declare module '*.jpg';
+""",
+
+    "frontend/.env": """VITE_API_URL=http://localhost:8001
+""",
+}
 
 _SYSTEM_PROMPT = """\
 You are a senior full-stack software engineer.
@@ -95,17 +264,285 @@ Rules you must follow without exception:
      - database name: use the project_name slug (e.g. todo-app)
      - DATABASE_URL format: postgresql+asyncpg://postgres:vinay2004@localhost:5432/{project_name}
 16. Never use placeholder credentials — always use the exact credentials above.
-17. NEVER use fake, invented, or non-existent npm packages. Only use real, published packages from npmjs.com. Verified safe packages include: react, react-dom, react-router-dom, axios, typescript, tailwindcss, framer-motion, lucide-react, three, gsap, @types/react, @types/react-dom, @types/node, react-scripts, vite, @vitejs/plugin-react, zustand, react-query, date-fns, uuid, dotenv, cors, bcryptjs, jsonwebtoken.
+17. NEVER use fake, invented, or non-existent npm packages. Only use real, published packages from npmjs.com. Verified safe packages include: react, react-dom, react-router-dom, axios, typescript, tailwindcss, framer-motion, lucide-react, three, gsap, @types/react, @types/react-dom, @types/node, vite, @vitejs/plugin-react, zustand, react-query, date-fns, uuid, dotenv, cors, bcryptjs, jsonwebtoken. NEVER use react-scripts — it is EOL and incompatible with Node 22+.
 18. Every generated frontend project must have 'skipLibCheck': true in tsconfig.json compilerOptions. This prevents TypeScript errors from third-party type definitions.
-19. Every generated frontend tsconfig.json must use typescript version compatible settings:
-    - 'target': 'es5' or 'ES2020'
-    - 'lib': ['dom', 'dom.iterable', 'esnext']
+19. Every generated frontend tsconfig.json must use Vite-compatible settings:
+    - 'target': 'ES2020'
+    - 'lib': ['ES2020', 'DOM', 'DOM.Iterable']
+    - 'module': 'ESNext'
+    - 'moduleResolution': 'bundler'
+    - 'allowImportingTsExtensions': true
     - 'skipLibCheck': true
-    - 'esModuleInterop': true
-    - 'allowSyntheticDefaultImports': true
+    - 'noEmit': true
+    - 'jsx': 'react-jsx'
 20. For Three.js imports always add // @ts-ignore comment before the import line:
     // @ts-ignore
-    import * as THREE from 'three';\
+    import * as THREE from 'three';
+
+21. CORS Configuration — ALWAYS use this exact pattern in FastAPI:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=['*'],
+        allow_credentials=False,
+        allow_methods=['*'],
+        allow_headers=['*'],
+    )
+    NEVER use allow_methods='*' or allow_headers='*' (must be lists, not strings).
+    NEVER use allow_credentials=True with allow_origins=['*'].
+
+22. React 18 — ALWAYS use createRoot, NEVER use ReactDOM.render:
+    CORRECT:
+    import ReactDOM from 'react-dom/client';
+    const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
+    root.render(<React.StrictMode><App /></React.StrictMode>);
+
+    WRONG (never use):
+    ReactDOM.render(<App />, document.getElementById('root'));
+
+23. requirements.txt — ALWAYS include ALL of these:
+    fastapi
+    uvicorn[standard]
+    sqlalchemy[asyncio]
+    asyncpg
+    python-dotenv
+    pydantic
+    httpx
+
+24. TypeScript catch blocks — ALWAYS type the catch variable:
+    CORRECT: catch (error: unknown) { ... }
+    Or: catch (error) { const err = error as Error; ... }
+    NEVER: catch (error) { error.message } without typing.
+
+25. tsconfig.json — ALWAYS use this exact Vite-compatible configuration:
+    {
+      "compilerOptions": {
+        "target": "ES2020",
+        "useDefineForClassFields": true,
+        "lib": ["ES2020", "DOM", "DOM.Iterable"],
+        "module": "ESNext",
+        "skipLibCheck": true,
+        "moduleResolution": "bundler",
+        "allowImportingTsExtensions": true,
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "noEmit": true,
+        "jsx": "react-jsx",
+        "strict": false,
+        "esModuleInterop": true,
+        "allowSyntheticDefaultImports": true
+      },
+      "include": ["src"]
+    }
+
+26. Pydantic v2 — Optional fields MUST have defaults:
+    CORRECT: field: Optional[int] = None
+    WRONG: field: Optional[int]
+
+27. CSS imports — index.tsx MUST import index.css, not globals.css:
+    CORRECT: import './index.css';
+    WRONG: import './styles/globals.css';
+
+28. Always create frontend/src/declarations.d.ts with:
+    declare module '*.css';
+    declare module '*.svg';
+    declare module '*.png';
+    declare module '*.jpg';
+
+29. Always create frontend/index.html (Vite entry point) at the ROOT of the frontend directory (NOT inside public/). It must reference src/index.tsx with: <script type="module" src="/src/index.tsx"></script>
+
+30. SQLAlchemy async — ALWAYS use this pattern for database.py:
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+    from sqlalchemy.orm import DeclarativeBase
+
+    DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql+asyncpg://postgres:vinay2004@localhost:5432/dbname')
+    engine = create_async_engine(DATABASE_URL, echo=False)
+    AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+    class Base(DeclarativeBase):
+        pass
+
+    async def get_db():
+        async with AsyncSessionLocal() as session:
+            yield session
+
+    async def init_db():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+31. FastAPI lifespan — ALWAYS use this pattern:
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await init_db()
+        yield
+
+    app = FastAPI(lifespan=lifespan)
+
+    NEVER use @app.on_event('startup') — it is deprecated.
+
+32. ALWAYS include frontend/src/index.css with basic reset styles.
+    ALWAYS import it in index.tsx as: import './index.css'
+
+33. Frontend .env — ALWAYS create with:
+    VITE_API_URL=http://localhost:8001
+
+34. Backend .env.example — ALWAYS create with exact values:
+    DATABASE_URL=postgresql+asyncpg://postgres:vinay2004@localhost:5432/{project_name}
+
+35. package.json — ALWAYS include react-router-dom and axios in dependencies. ALWAYS include vite, @vitejs/plugin-react, typescript, @types/react, @types/react-dom in devDependencies. NEVER include react-scripts.
+
+36. API URL in frontend — ALWAYS use this exact pattern (Vite uses import.meta.env, NOT process.env):
+    const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
+    NEVER use: process.env.REACT_APP_API_URL — Vite does NOT support process.env.
+    NEVER use: axios.post('/calculate') without full URL.
+    ALWAYS use: axios.post(`${API_URL}/calculate`)
+
+37. React state initialization — ALWAYS initialize with correct default values:
+    CORRECT:
+    const [num1, setNum1] = useState<number>(0);
+    const [num2, setNum2] = useState<number>(0);
+    const [result, setResult] = useState<number | null>(null);
+    const [text, setText] = useState<string>('');
+    const [items, setItems] = useState<Item[]>([]);
+    const [loading, setLoading] = useState<boolean>(false);
+    const [error, setError] = useState<string | null>(null);
+
+    NEVER initialize number state as undefined or empty:
+    WRONG: useState() or useState(undefined) for numbers.
+
+38. Input onChange handlers — ALWAYS convert to the correct type:
+    For number inputs:
+    onChange={(e) => setValue(Number(e.target.value) || 0)}
+    For text inputs:
+    onChange={(e) => setValue(e.target.value)}
+
+39. API calls — ALWAYS handle errors properly:
+    try {
+        const response = await axios.post(`${API_URL}/endpoint`, payload);
+        setResult(response.data);
+    } catch (error: unknown) {
+        const err = error as any;
+        setError(err?.response?.data?.detail || err?.message || 'An error occurred');
+    }
+
+40. Backend API routes — ALWAYS match frontend calls exactly:
+    If frontend calls: axios.post(`${API_URL}/calculate`)
+    Backend must have: @router.post('/calculate')
+    If frontend calls: axios.get(`${API_URL}/items`)
+    Backend must have: @router.get('/items')
+
+41. FastAPI router — ALWAYS include router in main.py:
+    from routes import router
+    app.include_router(router)
+    NEVER forget to include the router or all endpoints will return 404.
+
+42. Frontend runs on port 5173, backend runs on port 8001.
+    VITE_API_URL=http://localhost:8001
+    Backend CORS must allow_origins=['*'] to permit frontend access.
+
+43. Database initialization — ALWAYS call init_db() in lifespan:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await init_db()  # Creates all tables
+        yield
+    NEVER skip init_db() or tables won't exist and queries will fail.
+
+44. Pydantic models — ALWAYS match what the frontend sends:
+    If frontend sends: {num1: 5, num2: 3, operation: 'add'}
+    Backend must have:
+    class CalculateRequest(BaseModel):
+        num1: float
+        num2: float
+        operation: str
+
+    ALWAYS use float not int for numbers to handle decimal inputs.
+
+45. Response format — ALWAYS return consistent JSON:
+    CORRECT:
+    return {'result': result, 'status': 'success'}
+    Frontend expects: response.data.result
+
+    NEVER return plain values:
+    WRONG: return result  # Frontend cannot access this properly
+
+46. Pydantic v2 schemas — ALWAYS use model_config, NEVER use class Config:
+    CORRECT:
+    from pydantic import BaseModel, ConfigDict
+
+    class ItemResponse(BaseModel):
+        id: int
+        name: str
+        model_config = ConfigDict(from_attributes=True)
+
+    WRONG (Pydantic v1 syntax — never use):
+    class Config:
+        orm_mode = True
+
+47. NEVER mix SQLAlchemy models and Pydantic schemas in the same file.
+
+48. SQLAlchemy models — NEVER use table reflection. NEVER write:
+    __table__ = Base.metadata.tables['tablename']
+    This crashes at import time because the table doesn't exist in metadata yet.
+    ALWAYS define models with __tablename__ and mapped_column:
+    class Item(Base):
+        __tablename__ = 'items'
+        id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+        name: Mapped[str] = mapped_column(String(255))
+
+48b. FastAPI dependency injection — ALWAYS use Depends(get_db) for database sessions in route parameters:
+    CORRECT: async def create_item(payload: ItemRequest, db: AsyncSession = Depends(get_db)):
+    WRONG: async def create_item(payload: ItemRequest, db: AsyncSession = next(get_db())):
+    get_db() is an async generator — next() cannot iterate async generators and will crash at import time.
+    ALWAYS import Depends: from fastapi import Depends
+
+49. We use Vite not Create React App:
+- Environment variables MUST use VITE_ prefix: VITE_API_URL
+- Access with: import.meta.env.VITE_API_URL
+- NEVER use process.env.REACT_APP_* with Vite
+- const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001'
+- models.py: ONLY SQLAlchemy ORM classes that inherit from Base
+- schemas.py: ONLY Pydantic BaseModel classes for request/response validation
+- schemas.py must NEVER import Base or use SQLAlchemy
+- models.py must NEVER import BaseModel or use Pydantic
+- Always import Base in models.py: from database import Base
+- Always import models in routes.py: from models import Todo (or whatever model)
+
+50. CRITICAL UI REQUIREMENTS — Your frontend MUST look professional:
+
+MANDATORY: The index.html already has TailwindCSS CDN loaded via <script src='https://cdn.tailwindcss.com'></script> — use TailwindCSS classes freely everywhere.
+
+Every page MUST have:
+1. A styled header/navbar:
+<header class='bg-blue-600 text-white px-6 py-4 shadow-lg'>
+  <h1 class='text-2xl font-bold'>App Name</h1>
+</header>
+
+2. A centered container:
+<div class='max-w-4xl mx-auto px-4 py-8'>
+
+3. Styled buttons:
+<button class='bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg transition-colors duration-200 shadow-md'>
+
+4. Styled inputs:
+<input class='w-full border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors'/>
+
+5. Styled cards:
+<div class='bg-white rounded-xl shadow-md p-6 border border-gray-100 hover:shadow-lg transition-shadow'>
+
+6. Loading state:
+{loading && <div className='flex justify-center py-8'><div className='animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600'></div></div>}
+
+7. Error state:
+{error && <div className='bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg'>{error}</div>}
+
+8. Empty state:
+{items.length === 0 && <div className='text-center py-12 text-gray-400'><p className='text-lg'>No items yet</p></div>}
+
+ALWAYS use a pleasant color scheme — blue primary, white background, gray text.
+NEVER use unstyled HTML elements.
+The app must look like a real product.
 """
 
 
@@ -186,7 +623,15 @@ class FullProjectGenerator:
             self.agent_name, problem_statement[:80], opts,
         )
 
-        user_prompt = self._build_user_prompt(problem_statement, opts)
+        # Retrieve RAG context — verified templates injected before the task
+        try:
+            rag_context = rag_retriever.get_context_for_project(problem_statement)
+            logger.info("[%s] RAG context retrieved (%d chars)", self.agent_name, len(rag_context))
+        except Exception as rag_exc:
+            logger.warning("[%s] RAG retrieval failed (non-critical): %s", self.agent_name, rag_exc)
+            rag_context = ""
+
+        user_prompt = self._build_user_prompt(problem_statement, opts, rag_context)
 
         # ── Single LLM call ───────────────────────────────────────────────────
         logger.info("[%s] Sending single LLM call for complete project.", self.agent_name)
@@ -229,6 +674,74 @@ class FullProjectGenerator:
         files: list[dict] = project.get("files", [])
         setup_instructions: str = project.get("setup_instructions", "")
         env_variables: list[dict] = project.get("env_variables", [])
+
+        # ── Hybrid generation: apply templates for boilerplate files ──────────
+        pname_slug = project_name.replace("-", "_")
+        template_applied: list[str] = []
+
+        for i, f in enumerate(files):
+            path = f.get("path", "")
+            if path in TEMPLATE_FILES:
+                files[i] = {
+                    "path": path,
+                    "content": TEMPLATE_FILES[path].format(project_name=pname_slug),
+                }
+                template_applied.append(path)
+                logger.info("[%s] Applied template for: %s", self.agent_name, path)
+
+        existing_paths = {f.get("path", "") for f in files}
+        for template_path, template_content in TEMPLATE_FILES.items():
+            if template_path not in existing_paths:
+                files.append({
+                    "path": template_path,
+                    "content": template_content.format(project_name=pname_slug),
+                })
+                logger.info("[%s] Added missing template: %s", self.agent_name, template_path)
+
+        for i, f in enumerate(files):
+            if f.get("path") == "frontend/package.json":
+                try:
+                    pkg = json.loads(f["content"])
+                    pkg.setdefault("dependencies", {})
+                    pkg.setdefault("devDependencies", {})
+                    # Remove CRA/react-scripts (incompatible with Node 22+)
+                    pkg["dependencies"].pop("react-scripts", None)
+                    for fake_pkg in ["@react-bits/react", "@react-bits/ui", "react-bits"]:
+                        pkg["dependencies"].pop(fake_pkg, None)
+                    runtime_deps = {
+                        "react": "^18.0.0",
+                        "react-dom": "^18.0.0",
+                        "react-router-dom": "^6.8.0",
+                        "axios": "^1.3.0",
+                    }
+                    dev_deps = {
+                        "vite": "^5.0.0",
+                        "@vitejs/plugin-react": "^4.0.0",
+                        "typescript": "^5.0.0",
+                        "@types/react": "^18.0.0",
+                        "@types/react-dom": "^18.0.0",
+                        "@types/node": "^18.0.0",
+                    }
+                    for dep, ver in runtime_deps.items():
+                        pkg["dependencies"].setdefault(dep, ver)
+                    for dep, ver in dev_deps.items():
+                        pkg["devDependencies"].setdefault(dep, ver)
+                        pkg["dependencies"].pop(dep, None)  # move build tools out of deps
+                    pkg["scripts"] = {
+                        "dev": "vite",
+                        "start": "vite",
+                        "build": "vite build",
+                        "preview": "vite preview",
+                    }
+                    files[i]["content"] = json.dumps(pkg, indent=2)
+                except Exception as e:
+                    logger.warning("[%s] package.json fix failed: %s", self.agent_name, e)
+                break
+
+        logger.info(
+            "[%s] Hybrid generation: %d template(s) applied, %d LLM-generated file(s).",
+            self.agent_name, len(template_applied), len(files) - len(template_applied),
+        )
 
         # ── Build processed file list (in-memory tsconfig patch + README) ─────
         processed: list[dict] = []
@@ -286,12 +799,15 @@ class FullProjectGenerator:
             self.agent_name, project_name, len(files),
         )
 
-        # ── Debugging Agent — fix syntax / type errors ────────────────────────
+        # ── Debugging Agent — autonomous 5-phase fix pipeline ────────────────
         debug_fixes_applied = 0
         debug_remaining_errors: list[str] = []
         debug_attempts = 0
+        debug_fix_summary = ""
+        backend_verified = False
+        frontend_verified = False
 
-        logger.info("[%s] Running DebuggingAgent...", self.agent_name)
+        logger.info("[%s] Running DebuggingAgent (5-phase)...", self.agent_name)
         debug_result = await debugging_agent.debug_project(
             project_files=processed,
             project_name=project_name,
@@ -299,13 +815,23 @@ class FullProjectGenerator:
         )
         if debug_result["status"] in ("success", "partial"):
             processed = debug_result["fixed_files"]
-            debug_fixes_applied = debug_result.get("fixes_applied", 0)
+            debug_fixes_applied = debug_result.get("fixes_applied_count", 0)
             debug_remaining_errors = debug_result.get("remaining_errors", [])
             debug_attempts = debug_result.get("attempts", 0)
+            debug_fix_summary = debug_result.get("fix_summary", "")
+            backend_verified = debug_result.get("backend_status") == "running"
+            frontend_verified = debug_result.get("frontend_status") == "built"
             logger.info(
-                "[%s] DebuggingAgent: %d fix(es) applied, %d error(s) remaining",
+                "[%s] DebuggingAgent: %d fix(es), %d remaining — backend=%s frontend=%s",
                 self.agent_name, debug_fixes_applied, len(debug_remaining_errors),
+                debug_result.get("backend_status"), debug_result.get("frontend_status"),
             )
+
+        # ── Record successful build to RAG knowledge base ─────────────────────
+        try:
+            rag_retriever.record_successful_build(project_name, processed)
+        except Exception as rag_exc:
+            logger.warning("[%s] RAG record failed (non-critical): %s", self.agent_name, rag_exc)
 
         # ── Save to database (preferred) ──────────────────────────────────────
         if db is not None:
@@ -321,6 +847,9 @@ class FullProjectGenerator:
             db_result["debug_fixes_applied"] = debug_fixes_applied
             db_result["debug_remaining_errors"] = debug_remaining_errors
             db_result["debug_attempts"] = debug_attempts
+            db_result["debug_fix_summary"] = debug_fix_summary
+            db_result["backend_verified"] = backend_verified
+            db_result["frontend_verified"] = frontend_verified
             return db_result
 
         # ── Fallback: save to filesystem ──────────────────────────────────────
@@ -356,6 +885,9 @@ class FullProjectGenerator:
             "debug_fixes_applied": debug_fixes_applied,
             "debug_remaining_errors": debug_remaining_errors,
             "debug_attempts": debug_attempts,
+            "debug_fix_summary": debug_fix_summary,
+            "backend_verified": backend_verified,
+            "frontend_verified": frontend_verified,
         }
 
     async def _save_to_db(
@@ -420,17 +952,24 @@ class FullProjectGenerator:
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    def _build_user_prompt(self, problem_statement: str, options: dict) -> str:
+    def _build_user_prompt(self, problem_statement: str, options: dict, rag_context: str = "") -> str:
         """Compose the user-facing prompt from the problem statement and options.
 
         Args:
             problem_statement: Core project description.
             options: Feature flags — ``threejs``, ``gsap``, ``reactbits``.
+            rag_context: Pre-built RAG context string with verified templates.
 
         Returns:
             Formatted prompt string ready to send to the LLM.
         """
-        lines = [f"Project requirement: {problem_statement}"]
+        lines: list[str] = []
+
+        if rag_context:
+            lines.append(rag_context)
+            lines.append("\n=== YOUR TASK ===\n")
+
+        lines.append(f"Project requirement: {problem_statement}")
         extras: list[str] = []
         if options.get("threejs"):
             extras.append("Use Three.js for 3D visuals in the frontend.")
@@ -447,17 +986,7 @@ class FullProjectGenerator:
         return "\n".join(lines)
 
     def _clean_json(self, raw: str) -> str:
-        """Strip markdown fences wrapping a JSON response.
-
-        Some LLMs wrap JSON output in ` ```json ` fences despite instructions.
-        This method removes them so ``json.loads`` can parse the result cleanly.
-
-        Args:
-            raw: Raw string returned by the LLM.
-
-        Returns:
-            Clean JSON string with no surrounding markdown fences.
-        """
+        """Strip markdown fences and sanitize control characters in an LLM JSON response."""
         raw = raw.strip()
         for fence in ("```json", "```"):
             if raw.startswith(fence):
@@ -465,7 +994,47 @@ class FullProjectGenerator:
                 break
         if raw.endswith("```"):
             raw = raw[:-3]
-        return raw.strip()
+        raw = raw.strip()
+        return self._sanitize_json_control_chars(raw)
+
+    @staticmethod
+    def _sanitize_json_control_chars(raw: str) -> str:
+        """Escape literal control characters inside JSON string values.
+
+        Groq and other LLMs sometimes embed raw newlines/tabs inside JSON string
+        values instead of the required \\n / \\t escape sequences, causing
+        json.loads to raise 'Invalid control character'.  This method walks the
+        text character-by-character, tracks whether the cursor is inside a JSON
+        string, and replaces any bare control character (U+0000–U+001F) with its
+        proper JSON escape — leaving structural whitespace outside strings alone.
+        """
+        _ESCAPE: dict[str, str] = {
+            "\n": "\\n",
+            "\r": "\\r",
+            "\t": "\\t",
+            "\b": "\\b",
+            "\f": "\\f",
+        }
+        result: list[str] = []
+        in_string = False
+        escape_next = False
+
+        for ch in raw:
+            if escape_next:
+                result.append(ch)
+                escape_next = False
+            elif ch == "\\" and in_string:
+                result.append(ch)
+                escape_next = True
+            elif ch == '"':
+                in_string = not in_string
+                result.append(ch)
+            elif in_string and ord(ch) < 0x20:
+                result.append(_ESCAPE.get(ch, f"\\u{ord(ch):04x}"))
+            else:
+                result.append(ch)
+
+        return "".join(result)
 
     async def _generate_readme(
         self,
@@ -531,10 +1100,13 @@ DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5432/{slug}
 
 ### 6. Start backend
 cd backend
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 
-Backend API available at: http://localhost:8000
-API Documentation: http://localhost:8000/docs
+Backend API available at: http://localhost:8001
+API Documentation: http://localhost:8001/docs
+
+## Quick Start
+Run setup.bat (Windows) or bash setup.sh (Mac/Linux) to install everything and launch both servers automatically.
 
 ## Frontend Setup
 ### 1. Install dependencies
@@ -543,17 +1115,17 @@ npm install
 
 ### 2. Configure environment
 Create frontend/.env:
-REACT_APP_API_URL=http://localhost:8000
+VITE_API_URL=http://localhost:8001
 
 ### 3. Start frontend
-npm start
+npm run dev
 
-Frontend available at: http://localhost:3000
+Frontend available at: http://localhost:5173
 
 ## Running Both Together
 Open two terminals:
-Terminal 1 (Backend): cd backend && uvicorn main:app --reload
-Terminal 2 (Frontend): cd frontend && npm start
+Terminal 1 (Backend): cd backend && uvicorn main:app --port 8001 --reload
+Terminal 2 (Frontend): cd frontend && npm run dev
 
 ## API Endpoints
 List all FastAPI routes found in routes.py
@@ -566,7 +1138,7 @@ List all FastAPI routes found in routes.py
 
 ## Tech Stack
 - Backend: FastAPI, SQLAlchemy 2.0, asyncpg, PostgreSQL
-- Frontend: React 18, TypeScript, TailwindCSS
+- Frontend: React 18, TypeScript, TailwindCSS (Vite)
 - Database: PostgreSQL 14+"""
 
         logger.info("[%s] Generating README via LLM for project=%r", self.agent_name, project_name)
@@ -620,9 +1192,9 @@ DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5432/{slug}
 
 Start backend:
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ```
-API docs: http://localhost:8000/docs
+API docs: http://localhost:8001/docs
 
 ## Frontend Setup
 ```bash
@@ -632,14 +1204,14 @@ npm install
 
 Create `frontend/.env`:
 ```
-REACT_APP_API_URL=http://localhost:8000
+VITE_API_URL=http://localhost:8001
 ```
 
 Start frontend:
 ```bash
-npm start
+npm run dev
 ```
-App: http://localhost:3000
+App: http://localhost:5173
 
 ## Common Issues
 - **DB connection error**: Check PostgreSQL is running and DATABASE_URL is correct

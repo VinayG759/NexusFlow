@@ -1,0 +1,72 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\Priya\\OneDrive\\Desktop\\NexusFlow']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [6240] using WatchFiles
+[2026-05-03 07:12:22] [INFO] [nexusflow.src.tools.api_connector] — APIConnectorTool initialised with timeout=30s.
+[2026-05-03 07:12:22] [INFO] [nexusflow.src.tools.web_search] — WebSearchTool initialised.
+[2026-05-03 07:12:22] [INFO] [nexusflow.src.utils.api_analyzer] — APIAnalyzer initialised.
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.rag.embedder] — CodeEmbedder initialised
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.rag.vector_store] — VectorStore initialised
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.rag.rag_retriever] — RAGRetriever initialised
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.utils.training_collector] — TrainingCollector initialised.
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent initialised.
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.tools.file_manager] — FileManagerTool initialised with base_path=C:\Users\Priya\OneDrive\Desktop\NexusFlow
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.tools.file_manager] — FileManagerTool initialised with base_path=C:\Users\Priya\OneDrive\Desktop\NexusFlow
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.agents.file_agent] — FileAgent 'FileAgent' initialised.
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.agents.ui_design_agent] — UIDesignAgent initialised.
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.utils.full_project_generator] — FullProjectGenerator 'FullProjectGenerator' initialised.
+INFO:     Started server process [16516]
+INFO:     Waiting for application startup.
+[2026-05-03 07:12:46] [INFO] [nexusflow.main] — Starting NexusFlow v1.0.0...
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.database.connection] — Initialising database schema...
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.database.connection] — Database schema initialised successfully.
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.rag.vector_store] — Initialising ChromaDB at C:\Users\Priya\OneDrive\Desktop\NexusFlow\src\rag\../../chroma_db
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.rag.vector_store] — Knowledge base already has 38 examples
+[2026-05-03 07:12:46] [INFO] [nexusflow.src.rag.rag_retriever] — RAGRetriever ready
+[2026-05-03 07:12:46] [INFO] [nexusflow.main] — RAG system initialized
+[2026-05-03 07:12:46] [INFO] [nexusflow.main] — NexusFlow is ready to accept requests.
+INFO:     Application startup complete.
+[2026-05-03 07:13:06] [INFO] [nexusflow.main] — POST /build — problem='Build a simple todo list app with FastAPI backend and React TypeScript frontend using TailwindCSS. Users can add, comple' options={'threejs': False, 'gsap': False, 'reactbits': False, 'reference_context': ''}
+[2026-05-03 07:13:06] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Starting full project generation for: 'Build a simple todo list app with FastAPI backend and React TypeScript frontend ' options={'threejs': False, 'gsap': False, 'reactbits': False, 'reference_context': ''}
+[2026-05-03 07:13:06] [INFO] [nexusflow.src.rag.embedder] — Loading embedding model: all-MiniLM-L6-v2
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|##########| 103/103 [00:00<00:00, 6094.74it/s]
+[2026-05-03 07:13:15] [INFO] [nexusflow.src.rag.embedder] — Embedding model loaded
+[2026-05-03 07:13:15] [INFO] [nexusflow.src.rag.vector_store] — Retrieved 0 examples for query: Build a simple todo list app with FastAPI backend 
+[2026-05-03 07:13:15] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] RAG context retrieved (5006 chars)
+[2026-05-03 07:13:15] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Sending single LLM call for complete project.
+[2026-05-03 07:13:15] [INFO] [nexusflow.src.tools.api_connector] — Calling Groq model='llama-3.3-70b-versatile' prompt_len=5289
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.tools.api_connector] — Groq responded — model='llama-3.3-70b-versatile' prompt_tokens=4651 completion_tokens=2156
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Applied template for: backend/main.py
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Applied template for: backend/database.py
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Applied template for: backend/requirements.txt
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Applied template for: frontend/tsconfig.json
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Applied template for: frontend/src/index.tsx
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Applied template for: frontend/src/index.css
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Applied template for: backend/.env.example
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Added missing template: frontend/index.html
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Added missing template: frontend/vite.config.ts
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Added missing template: frontend/src/declarations.d.ts
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Added missing template: frontend/.env
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Hybrid generation: 7 template(s) applied, 11 LLM-generated file(s).
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Generating README via LLM for project='todo-app'
+[2026-05-03 07:13:21] [INFO] [nexusflow.src.tools.api_connector] — Calling Groq model='llama-3.3-70b-versatile' prompt_len=2694
+[2026-05-03 07:13:21] [WARNING] [nexusflow.src.tools.api_connector] — Groq rate limit (429) on attempt 1/3 — retrying in 5.0s
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.tools.api_connector] — Groq responded — model='llama-3.3-70b-versatile' prompt_tokens=755 completion_tokens=1198
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] README generated by LLM (4270 chars).
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] LLM returned project='todo-app' with 18 file(s); LLM-generated README added.
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Running DebuggingAgent (5-phase)...
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent starting autonomous debug for: todo-app
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 1] Static analysis...
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 1] Found 3 issue(s).
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 2] Auto-fixing 3 issue(s)...
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 2] Applied 3 fix(es), 0 remain.
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 3] Installing dependencies...
+[2026-05-03 07:13:29] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 3] pip install -r requirements.txt
+[2026-05-03 07:13:31] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 3] npm install --legacy-peer-deps
+[2026-05-03 07:13:57] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent [Phase 4] Runtime verification...
+[2026-05-03 07:13:57] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent database already exists: todo_app
+[2026-05-03 07:14:08] [INFO] [nexusflow.src.agents.debugging_agent] — DebuggingAgent done — status=success fixes=7 remaining=0 backend=running frontend=built
+[2026-05-03 07:14:08] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] DebuggingAgent: 7 fix(es), 0 remaining — backend=running frontend=built
+[2026-05-03 07:14:09] [INFO] [nexusflow.src.rag.rag_retriever] — Recorded 20 files from successful build: todo-app
+[2026-05-03 07:14:09] [INFO] [nexusflow.src.utils.full_project_generator] — [FullProjectGenerator] Saved project id=34 name='todo-app' with 20 file(s) to DB.
+[2026-05-03 07:14:09] [INFO] [nexusflow.main] — POST /build — status=success project='todo-app' id=34 total_files=20

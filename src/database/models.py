@@ -240,3 +240,66 @@ class ProjectFile(Base):
 
     def __repr__(self) -> str:
         return f"<ProjectFile id={self.id} path={self.file_path!r}>"
+
+
+# ── BuildAttempt ──────────────────────────────────────────────────────────────
+
+
+class BuildAttempt(Base):
+    """Records every build and debug attempt for training data collection."""
+
+    __tablename__ = "build_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+    problem_statement: Mapped[str] = mapped_column(Text)
+    generated_files: Mapped[str] = mapped_column(Text)  # JSON
+    errors_found: Mapped[str] = mapped_column(Text, default="[]")  # JSON list
+    fixes_applied: Mapped[str] = mapped_column(Text, default="[]")  # JSON list
+    final_status: Mapped[str] = mapped_column(String(50), default="unknown")
+    build_time_seconds: Mapped[float] = mapped_column(default=0.0)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<BuildAttempt id={self.id} project_id={self.project_id} status={self.final_status!r}>"
+
+
+# ── ErrorPattern ──────────────────────────────────────────────────────────────
+
+
+class ErrorPattern(Base):
+    """Tracks known error types, their fix strategies, and fix success rates."""
+
+    __tablename__ = "error_patterns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    error_type: Mapped[str] = mapped_column(String(100))
+    error_pattern: Mapped[str] = mapped_column(Text)
+    fix_strategy: Mapped[str] = mapped_column(Text)
+    success_count: Mapped[int] = mapped_column(default=0)
+    failure_count: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    last_used: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<ErrorPattern id={self.id} type={self.error_type!r}>"
+
+
+# ── TrainingExample ───────────────────────────────────────────────────────────
+
+
+class TrainingExample(Base):
+    """A high-quality (input, output) pair for future model fine-tuning."""
+
+    __tablename__ = "training_examples"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    input_prompt: Mapped[str] = mapped_column(Text)
+    error_context: Mapped[str] = mapped_column(Text)
+    correct_output: Mapped[str] = mapped_column(Text)
+    example_type: Mapped[str] = mapped_column(String(50))
+    quality_score: Mapped[float] = mapped_column(default=1.0)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<TrainingExample id={self.id} type={self.example_type!r}>"

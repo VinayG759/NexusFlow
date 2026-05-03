@@ -42,3 +42,11 @@ tavily-python==0.5.1
 # Async file I/O used by file_agent and other utilities.
 aiofiles==24.1.0
 
+# ── RAG (Retrieval Augmented Generation) ─────────────────────────────────────
+# Vector similarity extension for PostgreSQL (optional, used by pgvector).
+pgvector
+# Sentence embedding model for code similarity search.
+sentence-transformers
+# Local vector store for code knowledge base retrieval.
+chromadb
+
