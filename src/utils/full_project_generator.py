@@ -196,6 +196,88 @@ declare module '*.png';
 declare module '*.jpg';
 """,
 
+    "frontend/src/components/ui.tsx": """import React from 'react';
+
+export function Button({{ children, onClick, variant = 'primary', disabled = false, fullWidth = false }}: {{
+  children: React.ReactNode;
+  onClick?: () => void;
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost';
+  disabled?: boolean;
+  fullWidth?: boolean;
+}}) {{
+  const variants = {{
+    primary: 'bg-blue-600 hover:bg-blue-700 text-white shadow-md hover:shadow-lg',
+    secondary: 'bg-gray-100 hover:bg-gray-200 text-gray-700',
+    danger: 'bg-red-500 hover:bg-red-600 text-white',
+    ghost: 'bg-transparent hover:bg-gray-100 text-gray-600',
+  }};
+  return (
+    <button onClick={{onClick}} disabled={{disabled}}
+      className={{`${{variants[variant]}} ${{fullWidth ? 'w-full' : ''}} font-semibold py-2.5 px-5 rounded-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2`}}>
+      {{children}}
+    </button>
+  );
+}}
+
+export function Input({{ label, value, onChange, type = 'text', placeholder = '', error = '' }}: {{
+  label: string; value: string; onChange: (v: string) => void;
+  type?: string; placeholder?: string; error?: string;
+}}) {{
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="text-sm font-medium text-gray-700">{{label}}</label>
+      <input type={{type}} value={{value}} onChange={{e => onChange(e.target.value)}} placeholder={{placeholder}}
+        className={{`border-2 ${{error ? 'border-red-400' : 'border-gray-200'}} rounded-xl px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors bg-white text-gray-900`}} />
+      {{error && <span className="text-xs text-red-500">{{error}}</span>}}
+    </div>
+  );
+}}
+
+export function Card({{ children, className = '' }}: {{ children: React.ReactNode; className?: string }}) {{
+  return (
+    <div className={{`bg-white rounded-2xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow ${{className}}`}}>
+      {{children}}
+    </div>
+  );
+}}
+
+export function Badge({{ text, color = 'blue' }}: {{ text: string; color?: string }}) {{
+  const colors: Record<string, string> = {{
+    blue: 'bg-blue-100 text-blue-700',
+    green: 'bg-green-100 text-green-700',
+    red: 'bg-red-100 text-red-700',
+    yellow: 'bg-yellow-100 text-yellow-700',
+    gray: 'bg-gray-100 text-gray-700',
+  }};
+  return <span className={{`${{colors[color] || colors.blue}} text-xs font-semibold px-2.5 py-1 rounded-full`}}>{{text}}</span>;
+}}
+
+export function Spinner() {{
+  return <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600" />;
+}}
+
+export function EmptyState({{ title, description, action }}: {{ title: string; description: string; action?: React.ReactNode }}) {{
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      <div className="text-5xl mb-4">📭</div>
+      <h3 className="text-lg font-semibold text-gray-900 mb-2">{{title}}</h3>
+      <p className="text-gray-500 mb-6 max-w-sm">{{description}}</p>
+      {{action}}
+    </div>
+  );
+}}
+
+export function Alert({{ message, type = 'error' }}: {{ message: string; type?: 'error' | 'success' | 'warning' | 'info' }}) {{
+  const styles = {{
+    error: 'bg-red-50 border-red-200 text-red-700',
+    success: 'bg-green-50 border-green-200 text-green-700',
+    warning: 'bg-yellow-50 border-yellow-200 text-yellow-700',
+    info: 'bg-blue-50 border-blue-200 text-blue-700',
+  }};
+  return <div className={{`${{styles[type]}} border rounded-xl px-4 py-3 text-sm font-medium`}}>{{message}}</div>;
+}}
+""",
+
     "frontend/.env": """VITE_API_URL=http://localhost:8001
 """,
 }
@@ -509,40 +591,65 @@ Rules you must follow without exception:
 - Always import Base in models.py: from database import Base
 - Always import models in routes.py: from models import Todo (or whatever model)
 
-50. CRITICAL UI REQUIREMENTS — Your frontend MUST look professional:
+50. MANDATORY UI DESIGN RULES — Every app MUST look professional:
 
-MANDATORY: The index.html already has TailwindCSS CDN loaded via <script src='https://cdn.tailwindcss.com'></script> — use TailwindCSS classes freely everywhere.
+IMPORT UI COMPONENTS in every page:
+import { Button, Input, Card, Badge, Spinner, EmptyState, Alert } from '../components/ui';
 
-Every page MUST have:
-1. A styled header/navbar:
-<header class='bg-blue-600 text-white px-6 py-4 shadow-lg'>
-  <h1 class='text-2xl font-bold'>App Name</h1>
-</header>
+MANDATORY APP STRUCTURE:
+- Full page: min-h-screen bg-gray-50
+- Header: sticky top-0 z-10 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm
+- Main content: max-w-5xl mx-auto px-4 py-8
+- Page title: text-3xl font-bold text-gray-900 mb-2
+- Subtitle: text-gray-500 mb-8
 
-2. A centered container:
-<div class='max-w-4xl mx-auto px-4 py-8'>
+MANDATORY STATES:
+- Loading: <div className='flex justify-center py-16'><Spinner /></div>
+- Error: <Alert message={error} type='error' />
+- Empty: <EmptyState title='No items yet' description='Create your first item to get started' action={<Button onClick={handleCreate}>Create New</Button>} />
 
-3. Styled buttons:
-<button class='bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg transition-colors duration-200 shadow-md'>
+MANDATORY LIST ITEMS - each item in a styled row:
+<div className='bg-white rounded-xl border border-gray-100 p-4 flex items-center justify-between hover:shadow-sm transition-shadow mb-3'>
+  <div>
+    <h3 className='font-semibold text-gray-900'>{item.title}</h3>
+    <p className='text-sm text-gray-500'>{item.description}</p>
+  </div>
+  <div className='flex gap-2'>
+    <Button variant='ghost' onClick={() => handleEdit(item.id)}>Edit</Button>
+    <Button variant='danger' onClick={() => handleDelete(item.id)}>Delete</Button>
+  </div>
+</div>
 
-4. Styled inputs:
-<input class='w-full border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors'/>
+MANDATORY FORM LAYOUT:
+<Card className='max-w-lg'>
+  <h2 className='text-xl font-bold text-gray-900 mb-6'>Form Title</h2>
+  <div className='space-y-4'>
+    <Input label='Field Name' value={value} onChange={setValue} placeholder='Enter value' />
+    <Button fullWidth onClick={handleSubmit}>Submit</Button>
+  </div>
+</Card>
 
-5. Styled cards:
-<div class='bg-white rounded-xl shadow-md p-6 border border-gray-100 hover:shadow-lg transition-shadow'>
+COLOR SYSTEM — use consistently:
+- Primary: blue-600
+- Success: green-500
+- Danger: red-500
+- Text: gray-900 (headings), gray-600 (body), gray-400 (muted)
+- Backgrounds: white (cards), gray-50 (page), gray-100 (hover)
+- Borders: gray-200
 
-6. Loading state:
-{loading && <div className='flex justify-center py-8'><div className='animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600'></div></div>}
+NEVER use inline styles.
+NEVER use unstyled HTML.
+ALWAYS use TailwindCSS classes from the CDN already added to index.html.
 
-7. Error state:
-{error && <div className='bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg'>{error}</div>}
+51. App.tsx MUST import and use React Router for navigation:
+import { BrowserRouter, Routes, Route, Link, useNavigate } from 'react-router-dom';
 
-8. Empty state:
-{items.length === 0 && <div className='text-center py-12 text-gray-400'><p className='text-lg'>No items yet</p></div>}
+ALWAYS wrap app in BrowserRouter.
+ALWAYS have at minimum these routes:
+- / (home/landing or main feature)
+- /about or second feature page
 
-ALWAYS use a pleasant color scheme — blue primary, white background, gray text.
-NEVER use unstyled HTML elements.
-The app must look like a real product.
+Navigation bar MUST use Link components not <a> tags.
 """
 
 
