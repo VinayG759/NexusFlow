@@ -21,7 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from src.config.settings import settings
 from src.database.connection import AsyncSessionFactory, init_db
-from src.database.models import Project, ProjectFile, ErrorPattern
+from src.database.models import Project, ProjectFile, ErrorPattern, BuildAttempt, TrainingExample
 from src.tools.api_connector import api_connector
 from src.utils.logger import get_logger
 
@@ -36,6 +36,7 @@ from src.utils.api_analyzer import api_analyzer
 from src.rag.rag_retriever import rag_retriever
 from src.utils.full_project_generator import full_project_generator
 from src.utils.training_collector import training_collector, KNOWN_ERROR_PATTERNS
+from src.utils.training_data import TRAINING_DATA
 
 logger = get_logger(__name__)
 
@@ -78,18 +79,36 @@ class ClarifyRequest(BaseModel):
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 
-async def seed_error_patterns(db: AsyncSession) -> None:
-    existing = (await db.execute(select(ErrorPattern))).scalars().all()
-    if existing:
-        return
+async def seed_all_error_patterns(db: AsyncSession) -> None:
     for p in KNOWN_ERROR_PATTERNS:
-        db.add(ErrorPattern(
-            error_type=p["error_type"],
-            error_pattern=p["pattern"],
-            fix_strategy=p["fix_strategy"],
-        ))
+        result = await db.execute(
+            select(ErrorPattern).where(ErrorPattern.error_type == p["error_type"])
+        )
+        if not result.scalar_one_or_none():
+            db.add(ErrorPattern(
+                error_type=p["error_type"],
+                error_pattern=p["pattern"],
+                fix_strategy=p["fix_strategy"],
+            ))
     await db.commit()
-    logger.info("Seeded %d error patterns", len(KNOWN_ERROR_PATTERNS))
+    logger.info("Upserted error patterns (total defined: %d)", len(KNOWN_ERROR_PATTERNS))
+
+
+async def seed_all_training_data(db: AsyncSession) -> None:
+    from sqlalchemy import func
+    result = await db.execute(select(func.count()).select_from(TrainingExample))
+    count = result.scalar()
+    if count < len(TRAINING_DATA):
+        for item in TRAINING_DATA:
+            db.add(TrainingExample(
+                input_prompt=item.get("error", ""),
+                error_context=item.get("error_type", ""),
+                correct_output=item.get("fix", ""),
+                example_type=item.get("error_type", "unknown"),
+                quality_score=1.0 if item.get("instant_fix") else 0.8,
+            ))
+        await db.commit()
+        logger.info("Seeded %d training examples", len(TRAINING_DATA))
 
 
 @asynccontextmanager
@@ -99,7 +118,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     db = AsyncSessionFactory()
     try:
-        await seed_error_patterns(db)
+        await seed_all_error_patterns(db)
+        await seed_all_training_data(db)
     finally:
         await db.close()
 
@@ -614,6 +634,61 @@ async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)) ->
     await db.commit()
     logger.info("DELETE /projects/%d — deleted project %r", project_id, name)
     return {"status": "success", "message": f"Project '{name}' deleted"}
+
+
+# ── Training data endpoints ───────────────────────────────────────────────────
+
+
+@app.get("/training/stats")
+async def get_training_stats(db: AsyncSession = Depends(get_db)) -> dict:
+    return await training_collector.get_training_stats(db)
+
+
+@app.get("/training/examples")
+async def get_training_examples(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    result = await db.execute(
+        select(TrainingExample).order_by(TrainingExample.id.desc()).limit(50)
+    )
+    examples = result.scalars().all()
+    return [
+        {
+            "id": e.id,
+            "input_prompt": e.input_prompt[:100],
+            "example_type": e.example_type,
+            "quality_score": e.quality_score,
+            "created_at": str(e.created_at),
+        }
+        for e in examples
+    ]
+
+
+@app.post("/training/export")
+async def export_training_data(db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+    import io
+    result = await db.execute(
+        select(TrainingExample).where(TrainingExample.quality_score >= 0.8)
+    )
+    examples = result.scalars().all()
+
+    lines = []
+    for e in examples:
+        lines.append(json.dumps({
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are NexusFlow, an expert full-stack developer that generates complete, working FastAPI + React TypeScript applications.",
+                },
+                {"role": "user", "content": e.input_prompt},
+                {"role": "assistant", "content": e.correct_output},
+            ]
+        }))
+
+    content = "\n".join(lines)
+    return StreamingResponse(
+        io.BytesIO(content.encode()),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": "attachment; filename=nexusflow_training.jsonl"},
+    )
 
 
 # ── Setup script helpers ──────────────────────────────────────────────────────

@@ -2112,6 +2112,515 @@ TRAINING_DATA: list[dict] = [
     {"error": "502 Bad Gateway from Render after deployment", "error_type": "render_502", "fix": "Check Render logs for startup errors. Common causes: missing environment variables, wrong start command, import errors on startup, database connection failure.", "instant_fix": False, "llm_prompt": "The Render deployment returns 502. Check: 1) All env vars are set 2) Start command is correct 3) No import errors 4) Database is accessible", "notes": "502 means the app started but crashed immediately. Always check Render logs."},
     {"error": "GET /list-projects takes too long — scanning node_modules", "error_type": "performance_node_modules", "fix": "Exclude node_modules, __pycache__, and .git from file scanning: if 'node_modules' not in f.parts and '__pycache__' not in f.parts", "pattern": "for f in entry.rglob('*') if f.is_file()", "replacement": "for f in entry.rglob('*') if f.is_file() and 'node_modules' not in f.parts and '__pycache__' not in f.parts", "instant_fix": True, "fix_action": "replace_pattern", "notes": "node_modules contains thousands of files. Always exclude from recursive scans."},
     {"error": "Failed to execute 'insertBefore' on 'Node' — React DOM conflict with StackBlitz SDK", "error_type": "stackblitz_dom_conflict", "fix": "Use a useRef flag to ensure sdk.embedProject() is only called once. Never let React re-render the container div that StackBlitz injects into.", "instant_fix": False, "llm_prompt": "Fix React DOM conflict with StackBlitz: use hasEmbedded = useRef(false) to call sdk.embedProject only once. Keep the embed container div stable.", "notes": "StackBlitz SDK manipulates DOM directly. React's virtual DOM conflicts with this."},
+
+    # ═══ SAAS PATTERN EXAMPLES (quality_score=1.0) ═══
+
+    {
+        "error": "Build JWT auth in FastAPI",
+        "error_type": "saas_pattern",
+        "fix": '''from datetime import datetime, timedelta
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from database import get_db
+from models import User
+from schemas import UserCreate, UserResponse, Token
+import os
+
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+router = APIRouter()
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def hash_password(password):
+    return pwd_context.hash(password)
+
+def create_access_token(data, expires_delta=None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token=Depends(oauth2_scheme), db=Depends(get_db)):
+    credentials_exception = HTTPException(status_code=401, detail="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"})
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if email is None: raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if user is None: raise credentials_exception
+    return user
+
+@router.post("/auth/register")
+async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == user.email))
+    if result.scalar_one_or_none(): raise HTTPException(status_code=400, detail="Email already registered")
+    db_user = User(email=user.email, hashed_password=hash_password(user.password), name=user.name)
+    db.add(db_user)
+    await db.commit()
+    await db.refresh(db_user)
+    return db_user
+
+@router.post("/auth/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == form_data.username))
+    user = result.scalar_one_or_none()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    access_token = create_access_token(data={"sub": user.email}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@router.get("/auth/me")
+async def get_me(current_user=Depends(get_current_user)):
+    return current_user''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build React login form with TailwindCSS",
+        "error_type": "saas_pattern",
+        "fix": '''import React, { useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
+
+export default function Login() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const formData = new URLSearchParams();
+      formData.append("username", email);
+      formData.append("password", password);
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/login`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error("Invalid credentials");
+      const data = await res.json();
+      localStorage.setItem("token", data.access_token);
+      navigate("/dashboard");
+    } catch (err) { setError("Invalid email or password"); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Welcome back</h1>
+        <p className="text-gray-500 mb-8">Sign in to your account</p>
+        {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6">{error}</div>}
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required
+              className="w-full border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)} required
+              className="w-full border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors" />
+          </div>
+          <button type="submit" disabled={loading}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold py-3 rounded-lg transition-colors shadow-md">
+            {loading ? "Signing in..." : "Sign In"}
+          </button>
+        </form>
+        <p className="mt-6 text-center text-gray-500">No account? <Link to="/register" className="text-blue-600 font-semibold hover:underline">Sign up</Link></p>
+      </div>
+    </div>
+  );
+}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build FastAPI CRUD with pagination",
+        "error_type": "saas_pattern",
+        "fix": '''from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, or_
+from database import get_db
+from models import Item
+from schemas import ItemCreate, ItemResponse
+
+router = APIRouter()
+
+@router.get("/items")
+async def get_items(page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100), search: str = Query(""), db: AsyncSession = Depends(get_db)):
+    offset = (page - 1) * limit
+    query = select(Item)
+    if search:
+        query = query.where(or_(Item.title.ilike(f"%{search}%"), Item.description.ilike(f"%{search}%")))
+    total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
+    items = (await db.execute(query.offset(offset).limit(limit))).scalars().all()
+    return {"items": items, "total": total, "page": page, "pages": (total + limit - 1) // limit}
+
+@router.post("/items")
+async def create_item(item: ItemCreate, db: AsyncSession = Depends(get_db)):
+    db_item = Item(**item.model_dump())
+    db.add(db_item)
+    await db.commit()
+    await db.refresh(db_item)
+    return db_item
+
+@router.put("/items/{item_id}")
+async def update_item(item_id: int, item: ItemCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Item).where(Item.id == item_id))
+    db_item = result.scalar_one_or_none()
+    if not db_item: raise HTTPException(status_code=404, detail="Item not found")
+    for key, value in item.model_dump().items():
+        setattr(db_item, key, value)
+    await db.commit()
+    await db.refresh(db_item)
+    return db_item
+
+@router.delete("/items/{item_id}")
+async def delete_item(item_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Item).where(Item.id == item_id))
+    db_item = result.scalar_one_or_none()
+    if not db_item: raise HTTPException(status_code=404, detail="Item not found")
+    await db.delete(db_item)
+    await db.commit()
+    return {"message": "Deleted successfully"}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build React data table with search",
+        "error_type": "saas_pattern",
+        "fix": '''import React, { useState, useEffect } from "react";
+
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8001";
+
+export default function DataTable({ endpoint, columns, title }) {
+  const [data, setData] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+  const limit = 10;
+
+  useEffect(() => { fetchData(); }, [page, search]);
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, limit, search });
+      const res = await fetch(`${API_URL}/api/${endpoint}?${params}`, { headers: { Authorization: `Bearer ${localStorage.getItem("token")}` } });
+      const json = await res.json();
+      setData(json.items);
+      setTotal(json.total);
+    } catch (err) { console.error(err); }
+    finally { setLoading(false); }
+  };
+
+  const pages = Math.ceil(total / limit);
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+      <div className="p-6 border-b border-gray-200 flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-gray-900">{title}</h2>
+        <input value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
+          placeholder="Search..." className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+      </div>
+      {loading ? <div className="flex justify-center py-12"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" /></div> : (
+        <table className="w-full">
+          <thead className="bg-gray-50"><tr>{columns.map(col => <th key={col.key} className="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">{col.label}</th>)}</tr></thead>
+          <tbody className="divide-y divide-gray-100">
+            {data.map((row, i) => (
+              <tr key={i} className="hover:bg-gray-50 transition-colors">
+                {columns.map(col => <td key={col.key} className="px-6 py-4 text-sm text-gray-700">{col.render ? col.render(row[col.key], row) : String(row[col.key] ?? "")}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+        <span className="text-sm text-gray-500">{total} results</span>
+        <div className="flex gap-2">
+          <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-3 py-1 rounded border text-sm disabled:opacity-50">Previous</button>
+          <span className="px-3 py-1 text-sm text-gray-700">Page {page} of {pages || 1}</span>
+          <button onClick={() => setPage(p => Math.min(pages, p + 1))} disabled={page >= pages} className="px-3 py-1 rounded border text-sm disabled:opacity-50">Next</button>
+        </div>
+      </div>
+    </div>
+  );
+}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build SaaS dashboard layout",
+        "error_type": "saas_pattern",
+        "fix": '''import React, { useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+
+const navItems = [
+  { label: "Dashboard", path: "/dashboard", icon: "📊" },
+  { label: "Projects", path: "/projects", icon: "📁" },
+  { label: "Settings", path: "/settings", icon: "⚙️" },
+];
+
+export default function DashboardLayout({ children }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(true);
+  const user = JSON.parse(localStorage.getItem("user") || "{}");
+  const logout = () => { localStorage.clear(); navigate("/login"); };
+
+  return (
+    <div className="flex h-screen bg-gray-50">
+      <aside className={`${open ? "w-64" : "w-16"} bg-white border-r border-gray-200 flex flex-col transition-all duration-300`}>
+        <div className="p-4 border-b flex items-center justify-between">
+          {open && <span className="font-bold text-xl text-blue-600">App</span>}
+          <button onClick={() => setOpen(!open)} className="p-2 rounded-lg hover:bg-gray-100">☰</button>
+        </div>
+        <nav className="flex-1 p-4 space-y-2">
+          {navItems.map(item => (
+            <Link key={item.path} to={item.path}
+              className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-colors ${location.pathname === item.path ? "bg-blue-50 text-blue-600 font-semibold" : "text-gray-600 hover:bg-gray-100"}`}>
+              <span>{item.icon}</span>{open && <span>{item.label}</span>}
+            </Link>
+          ))}
+        </nav>
+        <div className="p-4 border-t">
+          {open && <p className="text-sm text-gray-500 mb-2 truncate">{user.email}</p>}
+          <button onClick={logout} className="text-red-500 hover:text-red-700 text-sm font-medium flex items-center gap-2">
+            <span>🚪</span>{open && "Logout"}
+          </button>
+        </div>
+      </aside>
+      <main className="flex-1 overflow-auto">
+        <header className="bg-white border-b px-6 py-4 flex items-center justify-between">
+          <h1 className="text-xl font-semibold text-gray-800">{navItems.find(i => i.path === location.pathname)?.label || "Dashboard"}</h1>
+          <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white text-sm font-bold">
+            {user.name?.[0]?.toUpperCase() || "U"}
+          </div>
+        </header>
+        <div className="p-6">{children}</div>
+      </main>
+    </div>
+  );
+}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build Stripe payment integration",
+        "error_type": "saas_pattern",
+        "fix": '''import stripe
+import os
+from fastapi import APIRouter, HTTPException, Request, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from database import get_db
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+router = APIRouter()
+
+@router.post("/payments/create-checkout")
+async def create_checkout_session(price_id: str, user_id: int, db: AsyncSession = Depends(get_db)):
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            mode="subscription",
+            success_url="http://localhost:5173/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="http://localhost:5173/pricing",
+            metadata={"user_id": str(user_id)},
+        )
+        return {"url": session.url}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/payments/webhook")
+async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid webhook signature")
+    if event["type"] == "checkout.session.completed":
+        user_id = event["data"]["object"]["metadata"]["user_id"]
+        # Update user subscription in DB
+    return {"status": "ok"}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build WebSocket real-time chat",
+        "error_type": "saas_pattern",
+        "fix": '''from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from typing import Dict, List
+import json
+
+router = APIRouter()
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, List[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, room: str):
+        await websocket.accept()
+        self.active_connections.setdefault(room, []).append(websocket)
+
+    def disconnect(self, websocket: WebSocket, room: str):
+        if room in self.active_connections:
+            self.active_connections[room].remove(websocket)
+
+    async def broadcast(self, message: dict, room: str):
+        for conn in self.active_connections.get(room, []):
+            await conn.send_text(json.dumps(message))
+
+manager = ConnectionManager()
+
+@router.websocket("/ws/{room}")
+async def websocket_endpoint(websocket: WebSocket, room: str):
+    await manager.connect(websocket, room)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await manager.broadcast({"message": json.loads(data), "room": room}, room)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, room)
+        await manager.broadcast({"message": "A user left", "room": room}, room)''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build file upload FastAPI",
+        "error_type": "saas_pattern",
+        "fix": '''import uuid
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
+router = APIRouter()
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+MAX_FILE_SIZE = 10 * 1024 * 1024
+ALLOWED_TYPES = {"image/jpeg", "image/png", "image/gif", "application/pdf"}
+
+@router.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    if file.content_type not in ALLOWED_TYPES:
+        raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large (max 10MB)")
+    filename = f"{uuid.uuid4()}{Path(file.filename).suffix}"
+    (UPLOAD_DIR / filename).write_bytes(contents)
+    return {"filename": filename, "url": f"/uploads/{filename}", "size": len(contents)}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build React stats cards",
+        "error_type": "saas_pattern",
+        "fix": '''import React from "react";
+
+export default function StatsCards({ stats }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+      {stats.map((stat, i) => (
+        <div key={i} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 hover:shadow-md transition-shadow">
+          <div className="flex items-center justify-between mb-4">
+            <span className={`text-2xl p-2 rounded-lg ${stat.color}`}>{stat.icon}</span>
+            {stat.trend && (
+              <span className={`text-sm font-medium ${stat.trendUp ? "text-green-600" : "text-red-600"}`}>
+                {stat.trendUp ? "↑" : "↓"} {stat.trend}
+              </span>
+            )}
+          </div>
+          <p className="text-3xl font-bold text-gray-900">{stat.value}</p>
+          <p className="text-sm text-gray-500 mt-1">{stat.label}</p>
+        </div>
+      ))}
+    </div>
+  );
+}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
+
+    {
+        "error": "Build React auth context",
+        "error_type": "saas_pattern",
+        "fix": '''import React, { createContext, useContext, useState, useEffect } from "react";
+
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8001";
+const AuthContext = createContext(null);
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [token, setToken] = useState(localStorage.getItem("token"));
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    if (token) { fetchUser(); }
+    else { setIsLoading(false); }
+  }, [token]);
+
+  const fetchUser = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error("Unauthorized");
+      setUser(await res.json());
+    } catch { logout(); }
+    finally { setIsLoading(false); }
+  };
+
+  const login = async (email, password) => {
+    const formData = new URLSearchParams();
+    formData.append("username", email);
+    formData.append("password", password);
+    const res = await fetch(`${API_URL}/api/auth/login`, { method: "POST", body: formData });
+    if (!res.ok) throw new Error("Invalid credentials");
+    const { access_token } = await res.json();
+    localStorage.setItem("token", access_token);
+    setToken(access_token);
+  };
+
+  const logout = () => {
+    localStorage.removeItem("token");
+    setToken(null);
+    setUser(null);
+  };
+
+  return <AuthContext.Provider value={{ user, token, login, logout, isLoading }}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
+  return ctx;
+}''',
+        "instant_fix": False,
+        "quality_score": 1.0,
+    },
 ]
 
 

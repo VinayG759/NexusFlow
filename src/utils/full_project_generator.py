@@ -17,6 +17,7 @@ Usage::
 
 import json
 import os
+import time
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,7 @@ from src.database.models import Project, ProjectFile
 from src.rag.rag_retriever import rag_retriever
 from src.tools.api_connector import api_connector
 from src.utils.logger import get_logger
+from src.utils.training_collector import training_collector
 
 logger = get_logger(__name__)
 
@@ -725,6 +727,7 @@ class FullProjectGenerator:
                 }
         """
         opts = options or {}
+        build_start_time = time.time()
         logger.info(
             "[%s] Starting full project generation for: %r options=%s",
             self.agent_name, problem_statement[:80], opts,
@@ -845,6 +848,27 @@ class FullProjectGenerator:
                     logger.warning("[%s] package.json fix failed: %s", self.agent_name, e)
                 break
 
+        # Ensure App.tsx exists — index.tsx always imports './App'
+        if not any(f.get("path") in ("frontend/src/App.tsx", "frontend/src/app.tsx") for f in files):
+            files.append({
+                "path": "frontend/src/App.tsx",
+                "content": (
+                    "import React from 'react';\n\n"
+                    "function App() {\n"
+                    "  return (\n"
+                    "    <div className=\"min-h-screen bg-gray-50 flex items-center justify-center\">\n"
+                    "      <div className=\"bg-white rounded-2xl shadow-sm border border-gray-100 p-8 text-center\">\n"
+                    "        <h1 className=\"text-3xl font-bold text-gray-900 mb-2\">App is running!</h1>\n"
+                    "        <p className=\"text-gray-500\">Your application is ready.</p>\n"
+                    "      </div>\n"
+                    "    </div>\n"
+                    "  );\n"
+                    "}\n\n"
+                    "export default App;\n"
+                ),
+            })
+            logger.info("[%s] Added default App.tsx (was missing from LLM output)", self.agent_name)
+
         logger.info(
             "[%s] Hybrid generation: %d template(s) applied, %d LLM-generated file(s).",
             self.agent_name, len(template_applied), len(files) - len(template_applied),
@@ -957,6 +981,39 @@ class FullProjectGenerator:
             db_result["debug_fix_summary"] = debug_fix_summary
             db_result["backend_verified"] = backend_verified
             db_result["frontend_verified"] = frontend_verified
+
+            # ── Record training data ──────────────────────────────────────────
+            try:
+                logger.info(
+                    "[%s] debug_result: backend_status=%r frontend_status=%r",
+                    self.agent_name,
+                    debug_result.get("backend_status"),
+                    debug_result.get("frontend_status"),
+                )
+                backend_ok = backend_verified
+                frontend_ok = frontend_verified
+                build_status = "success" if backend_ok and frontend_ok else "partial" if backend_ok else "failed"
+                await training_collector.record_build_attempt(
+                    db=db,
+                    project_id=db_result.get("project_id"),
+                    problem_statement=problem_statement,
+                    errors=debug_result.get("remaining_errors", []),
+                    fixes=debug_result.get("fixes_applied_list", []),
+                    status=build_status,
+                    build_time=time.time() - build_start_time,
+                )
+                if backend_ok and frontend_ok:
+                    files_summary = "\n".join([f["path"] for f in processed[:10]])
+                    await training_collector.record_training_example(
+                        db=db,
+                        input_prompt=problem_statement,
+                        error_context="successful_build",
+                        correct_output=files_summary,
+                        example_type="successful_build",
+                        quality_score=1.0,
+                    )
+            except Exception as e:
+                logger.warning("Failed to record training data: %s", e)
             return db_result
 
         # ── Fallback: save to filesystem ──────────────────────────────────────

@@ -596,6 +596,7 @@ class DebuggingAgent:
         fm = self._fix_invalid_model_definition(fm, fixes)
         fm = self._fix_missing_css_imports(fm, issues, fixes)
         fm = self._fix_missing_packages(fm, issues, fixes)
+        fm = self._fix_missing_app(fm, fixes)
 
         # Drop issues that structural fixers already resolved so they never reach errors
         resolved: set[str] = set()
@@ -1006,6 +1007,29 @@ class DebuggingAgent:
             if resolved not in fm:
                 fm[resolved] = basic_css
                 fixes.append(f"Created missing CSS file: {resolved}")
+        return fm
+
+    def _fix_missing_app(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Create a default App.tsx if index.tsx imports './App' but App.tsx is missing/empty."""
+        index_tsx = fm.get("frontend/src/index.tsx", "")
+        app_tsx = fm.get("frontend/src/App.tsx", "")
+        imports_app = "from './App'" in index_tsx or 'from "./App"' in index_tsx
+        if imports_app and not app_tsx.strip():
+            fm["frontend/src/App.tsx"] = (
+                "import React from 'react';\n\n"
+                "function App() {\n"
+                "  return (\n"
+                "    <div className=\"min-h-screen bg-gray-50 flex items-center justify-center\">\n"
+                "      <div className=\"bg-white rounded-2xl shadow-sm border border-gray-100 p-8 text-center\">\n"
+                "        <h1 className=\"text-3xl font-bold text-gray-900 mb-2\">App is running!</h1>\n"
+                "        <p className=\"text-gray-500\">Your application is ready.</p>\n"
+                "      </div>\n"
+                "    </div>\n"
+                "  );\n"
+                "}\n\n"
+                "export default App;\n"
+            )
+            fixes.append("Created default App.tsx (index.tsx imports './App' but App.tsx was missing)")
         return fm
 
     def _fix_missing_packages(
