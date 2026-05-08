@@ -35,12 +35,11 @@ _GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 _GROQ_DEFAULT_MAX_TOKENS = 4096
 
-# Models tried in order when a rate-limit (429) is hit on the primary model.
-# Each has an independent daily quota on Groq, so fallbacks extend total capacity.
+# Primary Groq model. llama-3.1-8b-instant removed: its free-tier TPM cap (6000)
+# is lower than a typical build prompt (~9k tokens), so it can never serve as
+# a useful fallback. On 429 we retry the same model after the TPM window resets.
 MODELS_IN_ORDER = [
-    "llama-3.3-70b-versatile",   # primary  — 100k TPD free tier
-    "llama-3.1-8b-instant",      # fallback — 500k TPD free tier, faster
-    "mixtral-8x7b-32768",        # last resort — separate quota
+    "llama-3.3-70b-versatile",   # 128k ctx, ~14k TPM free tier
 ]
 
 
@@ -327,11 +326,32 @@ class APIConnectorTool:
                         _GROQ_CHAT_URL, headers=headers, json=body
                     )
 
+                    # 429 = TPM rate limit — wait for the 1-minute window to reset,
+                    # then retry the SAME model (don't cascade: fallback models have
+                    # lower TPM caps and can't handle large prompts on the free tier).
                     if response.status_code == 429:
                         last_error = response.text
+                        if attempt < max_retries - 1:
+                            logger.warning(
+                                "Groq 429 on model=%r — waiting 65s for TPM window reset (attempt %d/%d)",
+                                model_name, attempt + 1, max_retries,
+                            )
+                            await asyncio.sleep(65)
+                            continue  # retry same model
                         logger.warning(
-                            "Groq rate limit (429) on model=%r — switching to next model in 2s",
-                            model_name,
+                            "Groq 429 on model=%r — all %d attempts exhausted, cascading",
+                            model_name, max_retries,
+                        )
+                        await asyncio.sleep(2)
+                        break  # try next model only after all retries
+
+                    # 413 = request too large for this model, 400 = model decommissioned
+                    # Cascade immediately to the next model.
+                    if response.status_code in (400, 413):
+                        last_error = response.text
+                        logger.warning(
+                            "Groq %d on model=%r — cascading to next model",
+                            response.status_code, model_name,
                         )
                         await asyncio.sleep(2)
                         break  # exit retry loop, move to next model
