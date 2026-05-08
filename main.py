@@ -4,14 +4,17 @@ import io
 import json
 import asyncio
 import httpx
+import uuid
 import zipfile
 
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Any, Dict
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -39,6 +42,8 @@ from src.utils.training_collector import training_collector, KNOWN_ERROR_PATTERN
 from src.utils.training_data import TRAINING_DATA
 
 logger = get_logger(__name__)
+
+_build_jobs: Dict[str, Any] = {}
 
 # ── Request / response models ─────────────────────────────────────────────────
 
@@ -204,35 +209,38 @@ async def list_agents() -> dict:
     }
 
 
-@app.post("/build")
-async def build(request: BuildRequest, db: AsyncSession = Depends(get_db)) -> dict:
-    options: dict = {
-        "threejs": request.use_threejs,
-        "gsap": request.use_gsap,
-        "reactbits": request.use_reactbits,
-        "reference_context": request.reference_context,
-    }
-
-    problem = request.problem_statement
-    if request.additional_context.strip():
-        problem = f"{request.additional_context.strip()}\n\n{problem}"
-    if len(problem) > 3000:
-        problem = problem[:3000] + "..."
-
-    logger.info("POST /build — problem=%r options=%s", problem[:120], options)
-
+async def run_build_job(job_id: str, request: BuildRequest) -> None:
     try:
-        try:
-            result = await full_project_generator.generate(problem, options, db)
-        except Exception as gen_exc:
-            logger.exception("POST /build — generate() raised: %s", gen_exc)
-            return {"status": "error", "message": str(gen_exc), "project_name": "", "project_id": None, "total_files": 0, "setup_instructions": ""}
+        options: dict = {
+            "threejs": request.use_threejs,
+            "gsap": request.use_gsap,
+            "reactbits": request.use_reactbits,
+            "reference_context": request.reference_context,
+        }
+        problem = request.problem_statement
+        if request.additional_context.strip():
+            problem = f"{request.additional_context.strip()}\n\n{problem}"
+        if len(problem) > 3000:
+            problem = problem[:3000] + "..."
 
-        logger.info(
-            "POST /build — status=%s project=%r id=%s total_files=%s",
-            result["status"], result.get("project_name"), result.get("project_id"), result.get("total_files"),
-        )
-        return {
+        logger.info("Build job %s started — problem=%r", job_id, problem[:120])
+        _build_jobs[job_id]["progress"] = "Generating project with AI..."
+
+        db = AsyncSessionFactory()
+        try:
+            _build_jobs[job_id]["progress"] = "Running debugging agent..."
+            result = await full_project_generator.generate(problem, options, db)
+            _build_jobs[job_id]["progress"] = "Saving to database..."
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+        finally:
+            await db.close()
+
+        _build_jobs[job_id]["status"] = "complete"
+        _build_jobs[job_id]["progress"] = "Done!"
+        _build_jobs[job_id]["result"] = {
             "status": result["status"],
             "message": result.get("error", ""),
             "project_id": result.get("project_id"),
@@ -245,10 +253,41 @@ async def build(request: BuildRequest, db: AsyncSession = Depends(get_db)) -> di
             "backend_verified": result.get("backend_verified", False),
             "frontend_verified": result.get("frontend_verified", False),
         }
+        logger.info("Build job %s complete — project=%r", job_id, result.get("project_name"))
+    except Exception as e:
+        _build_jobs[job_id]["status"] = "failed"
+        _build_jobs[job_id]["error"] = str(e)
+        _build_jobs[job_id]["progress"] = "Failed"
+        logger.exception("Build job %s failed: %s", job_id, e)
 
-    except Exception as exc:
-        logger.exception("POST /build unhandled error: %s", exc)
-        return {"status": "error", "message": str(exc), "project_name": "", "project_id": None, "total_files": 0, "setup_instructions": ""}
+
+@app.post("/build")
+async def build(request: BuildRequest, background_tasks: BackgroundTasks) -> dict:
+    job_id = str(uuid.uuid4())
+    _build_jobs[job_id] = {
+        "status": "running",
+        "progress": "Starting build...",
+        "result": None,
+        "error": None,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    background_tasks.add_task(run_build_job, job_id, request)
+    logger.info("POST /build — job_id=%s", job_id)
+    return {"job_id": job_id, "status": "running", "message": "Build started"}
+
+
+@app.get("/build/status/{job_id}")
+async def build_status(job_id: str) -> dict:
+    if job_id not in _build_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _build_jobs[job_id]
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "result": job["result"] if job["status"] == "complete" else None,
+        "error": job["error"],
+    }
 
 
 @app.post("/analyze")
