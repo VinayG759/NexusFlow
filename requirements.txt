@@ -42,6 +42,10 @@ tavily-python==0.5.1
 # Async file I/O used by file_agent and other utilities.
 aiofiles==24.1.0
 
+# ── Process inspection ────────────────────────────────────────────────────────
+# Used by debugging_agent to kill stale port listeners before each build.
+psutil>=6.0.0
+
 # ── RAG (Retrieval Augmented Generation) ─────────────────────────────────────
 # Vector similarity extension for PostgreSQL (optional, used by pgvector).
 pgvector

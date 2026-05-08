@@ -1,7 +1,6 @@
 """Vector store using ChromaDB for storing and retrieving code examples."""
 
 import os
-import chromadb
 from src.rag.embedder import code_embedder
 from src.rag.knowledge_base import PERFECT_EXAMPLES
 from src.utils.logger import get_logger
@@ -18,15 +17,23 @@ class VectorStore:
 
     def initialize(self):
         """Initialize ChromaDB and populate with knowledge base."""
-        logger.info("Initialising ChromaDB at %s", self.db_path)
-        self.client = chromadb.PersistentClient(path=self.db_path)
-        self.collection = self.client.get_or_create_collection(
-            name="nexusflow_knowledge",
-            metadata={"hnsw:space": "cosine"}
-        )
-
-        logger.info("Upserting %d examples into knowledge base", len(PERFECT_EXAMPLES))
-        self._populate()
+        try:
+            import chromadb
+            logger.info("Initialising ChromaDB at %s", self.db_path)
+            self.client = chromadb.PersistentClient(path=self.db_path)
+            self.collection = self.client.get_or_create_collection(
+                name="nexusflow_knowledge",
+                metadata={"hnsw:space": "cosine"}
+            )
+            count = self.collection.count()
+            if count < len(PERFECT_EXAMPLES):
+                logger.info("Upserting %d examples into knowledge base", len(PERFECT_EXAMPLES))
+                self._populate()
+            logger.info("ChromaDB initialized with %d examples", self.collection.count())
+        except Exception as e:
+            logger.warning("ChromaDB unavailable: %s - RAG will use templates only", e)
+            self.client = None
+            self.collection = None
 
     def _populate(self):
         """Add all perfect examples to the vector store."""
@@ -62,6 +69,8 @@ class VectorStore:
         """Retrieve most relevant examples for a query."""
         if not self.collection:
             self.initialize()
+        if not self.collection:
+            return []
 
         query_embedding = code_embedder.embed(query)
 
@@ -94,6 +103,8 @@ class VectorStore:
         """Add a new example to the knowledge base at runtime."""
         if not self.collection:
             self.initialize()
+        if not self.collection:
+            return
 
         text = f"{example['description']} {example.get('code', '')}"
         embedding = code_embedder.embed(text)

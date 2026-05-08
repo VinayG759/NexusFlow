@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 try:
@@ -26,6 +27,11 @@ try:
 except ImportError:
     psycopg2 = None  # type: ignore[assignment]
     ISOLATION_LEVEL_AUTOCOMMIT = None  # type: ignore[assignment]
+
+try:
+    import psutil as _psutil
+except ImportError:
+    _psutil = None  # type: ignore[assignment]
 
 from src.utils.logger import get_logger
 from src.utils.training_collector import training_collector, _KNOWN_VERSIONS
@@ -39,6 +45,7 @@ _FAKE_PACKAGES: frozenset[str] = frozenset({
     "@react-bits/components",
     "@react-bits/animations",
     "react-bits",
+    "@types/tailwindcss",  # not a real package; types are bundled inside tailwindcss itself
 })
 
 # Packages that must always be present in requirements.txt (canonical pip names)
@@ -92,6 +99,15 @@ def _find_free_port() -> int:
         s.bind(("", 0))
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return s.getsockname()[1]
+
+
+def _reserve_port() -> tuple[int, socket.socket]:
+    """Bind to port 0, return (port, open_socket). Caller must close socket before Popen."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("", 0))
+    port = s.getsockname()[1]
+    return port, s
 
 
 def _fmap(files: list[dict]) -> dict[str, str]:
@@ -1168,10 +1184,16 @@ class DebuggingAgent:
             "UploadFile":      "from fastapi import UploadFile",
             "BackgroundTasks": "from fastapi import BackgroundTasks",
         }
+        _ORM_IMPORT = "from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, relationship"
         _SA_IMPORTS: dict[str, str] = {
-            "AsyncSession": "from sqlalchemy.ext.asyncio import AsyncSession",
-            "Session":      "from sqlalchemy.orm import Session",
-            "select":       "from sqlalchemy import select",
+            "AsyncSession":   "from sqlalchemy.ext.asyncio import AsyncSession",
+            "Session":        "from sqlalchemy.orm import Session",
+            "select":         "from sqlalchemy import select",
+            "Mapped":         _ORM_IMPORT,
+            "mapped_column":  _ORM_IMPORT,
+            "DeclarativeBase": _ORM_IMPORT,
+            "relationship":   _ORM_IMPORT,
+            "ForeignKey":     "from sqlalchemy import ForeignKey",
         }
         for path in list(fm.keys()):
             if not (path.startswith("backend/") and path.endswith(".py")):
@@ -1188,6 +1210,7 @@ class DebuggingAgent:
                 )
                 if not already and re.search(rf"\b{symbol}\s*[\(\[,\s]", content):
                     to_add.append(import_line)
+            to_add = list(dict.fromkeys(to_add))  # deduplicate, preserving order
             if to_add:
                 lines = content.splitlines()
                 insert_at = 0
@@ -1349,41 +1372,47 @@ class DebuggingAgent:
         return files, ""
 
     def _create_database(self, project_name: str, files: list[dict]) -> bool:
-        """Auto-create PostgreSQL database if it doesn't exist."""
+        """Auto-create PostgreSQL database if it doesn't exist (3 attempts, 2s apart)."""
         if psycopg2 is None:
             logger.warning("%s psycopg2 not installed — skipping DB creation", self.agent_name)
             return False
-        try:
-            db_name = project_name.lower().replace("-", "_").replace(" ", "_")
-            for f in files:
-                if f["path"] in ("backend/.env", ".env"):
-                    for line in f["content"].splitlines():
-                        if line.startswith("DATABASE_URL"):
-                            url = line.split("=", 1)[-1].strip()
-                            db_name = url.split("/")[-1].split("?")[0]
-                            break
 
-            conn = psycopg2.connect(
-                dbname="postgres",
-                user="postgres",
-                password="vinay2004",
-                host="localhost",
-                port=5432,
-            )
-            conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-            cur = conn.cursor()
-            cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
-            if not cur.fetchone():
-                cur.execute(f'CREATE DATABASE "{db_name}"')
-                logger.info("%s created database: %s", self.agent_name, db_name)
-            else:
-                logger.info("%s database already exists: %s", self.agent_name, db_name)
-            cur.close()
-            conn.close()
-            return True
-        except Exception as e:
-            logger.warning("%s could not create database: %s", self.agent_name, e)
-            return False
+        db_name = project_name.lower().replace("-", "_").replace(" ", "_")
+        for f in files:
+            if f["path"] in ("backend/.env", ".env"):
+                for line in f["content"].splitlines():
+                    if line.startswith("DATABASE_URL"):
+                        url = line.split("=", 1)[-1].strip()
+                        db_name = url.split("/")[-1].split("?")[0]
+                        break
+
+        for attempt in range(1, 4):
+            try:
+                conn = psycopg2.connect(
+                    dbname="postgres",
+                    user="postgres",
+                    password="vinay2004",
+                    host="localhost",
+                    port=5432,
+                )
+                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+                cur = conn.cursor()
+                cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
+                if not cur.fetchone():
+                    cur.execute(f'CREATE DATABASE "{db_name}"')
+                    logger.info("%s created database: %s", self.agent_name, db_name)
+                else:
+                    logger.info("%s database already exists: %s", self.agent_name, db_name)
+                cur.close()
+                conn.close()
+                return True
+            except Exception as e:
+                logger.warning(
+                    "%s DB creation attempt %d/3 failed: %s", self.agent_name, attempt, e
+                )
+                if attempt < 3:
+                    time.sleep(2)
+        return False
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 4 — Runtime Verification
@@ -1402,10 +1431,26 @@ class DebuggingAgent:
         backend_url = ""
         crash_diagnosis = ""
 
+        # ── Kill leftover listeners from previous builds ───────────────────────
+        if _psutil is not None:
+            try:
+                for _conn in _psutil.net_connections(kind="tcp"):
+                    if (
+                        8100 <= _conn.laddr.port < 8300
+                        and _conn.status == "LISTEN"
+                        and _conn.pid
+                    ):
+                        try:
+                            _psutil.Process(_conn.pid).kill()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
         # ── Backend ───────────────────────────────────────────────────────────
         backend_dir = temp_dir / "backend"
         if backend_dir.exists():
-            port = _find_free_port()
+            port, _port_sock = _reserve_port()
             backend_url = f"http://localhost:{port}"
             proc: subprocess.Popen | None = None
             try:
@@ -1420,6 +1465,7 @@ class DebuggingAgent:
 
                 self._create_database(project_name, files)
 
+                _port_sock.close()  # release socket so uvicorn can bind the same port
                 proc = subprocess.Popen(
                     [sys.executable, "-m", "uvicorn", "main:app",
                      "--host", "0.0.0.0", "--port", str(port)],
@@ -1429,18 +1475,38 @@ class DebuggingAgent:
                     env=env,
                 )
 
-                await asyncio.sleep(8)
-
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    for endpoint in ("/health", "/", "/docs"):
-                        try:
-                            resp = await client.get(f"{backend_url}{endpoint}")
-                            if resp.status_code < 500:
+                for _attempt in range(30):
+                    await asyncio.sleep(1)
+                    if proc.poll() is not None:
+                        break  # process already died
+                    try:
+                        async with httpx.AsyncClient(timeout=2.0) as _hc:
+                            _r = await _hc.get(f"{backend_url}/health")
+                            if _r.status_code < 500:
                                 backend_status = "running"
-                                fixes.append(f"Backend verified running at {backend_url}{endpoint}")
+                                fixes.append(
+                                    f"Backend verified at {backend_url}/health "
+                                    f"after {_attempt + 1}s"
+                                )
                                 break
-                        except Exception:
-                            continue
+                    except Exception:
+                        pass
+
+                if backend_status != "running" and proc.poll() is None:
+                    # Give a final 5-second grace period and try all endpoints
+                    await asyncio.sleep(5)
+                    async with httpx.AsyncClient(timeout=3.0) as client:
+                        for endpoint in ("/health", "/", "/docs"):
+                            try:
+                                resp = await client.get(f"{backend_url}{endpoint}")
+                                if resp.status_code < 500:
+                                    backend_status = "running"
+                                    fixes.append(
+                                        f"Backend verified at {backend_url}{endpoint} (slow start)"
+                                    )
+                                    break
+                            except Exception:
+                                continue
 
                 if backend_status != "running":
                     proc.terminate()

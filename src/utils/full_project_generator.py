@@ -750,6 +750,11 @@ class FullProjectGenerator:
             system_prompt=_SYSTEM_PROMPT,
         )
 
+        _model_used = llm_result.get("model_used") or llm_result.get("model", "llama-3.3-70b-versatile")
+        _is_fallback = _model_used != "llama-3.3-70b-versatile"
+        logger.info("[%s] LLM generation used model: %r%s", self.agent_name, _model_used,
+                    " (fallback)" if _is_fallback else "")
+
         if llm_result["status"] != "success":
             error_msg = llm_result.get("error", "LLM call returned non-success status.")
             logger.error("[%s] LLM call failed: %s", self.agent_name, error_msg)
@@ -975,6 +980,9 @@ class FullProjectGenerator:
                 env_variables=env_variables,
                 processed=processed,
             )
+            if _is_fallback:
+                db_result["generated_with"] = "fallback_model"
+                db_result["model_used"] = _model_used
             db_result["debug_fixes_applied"] = debug_fixes_applied
             db_result["debug_remaining_errors"] = debug_remaining_errors
             db_result["debug_attempts"] = debug_attempts

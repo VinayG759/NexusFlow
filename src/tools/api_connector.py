@@ -35,6 +35,14 @@ _GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
 _GROQ_DEFAULT_MAX_TOKENS = 4096
 
+# Models tried in order when a rate-limit (429) is hit on the primary model.
+# Each has an independent daily quota on Groq, so fallbacks extend total capacity.
+MODELS_IN_ORDER = [
+    "llama-3.3-70b-versatile",   # primary  — 100k TPD free tier
+    "llama-3.1-8b-instant",      # fallback — 500k TPD free tier, faster
+    "mixtral-8x7b-32768",        # last resort — separate quota
+]
+
 
 class APIConnectorTool:
     """Async HTTP client tool for REST API calls and LLM access.
@@ -248,29 +256,34 @@ class APIConnectorTool:
         retry_delay: float = 5.0,
         max_tokens: int | None = None,
     ) -> dict:
-        """Call the Groq inference API using an OpenAI-compatible chat endpoint.
+        """Call the Groq inference API with automatic model-cascade fallback.
 
-        Sends a chat completion request to Groq with an optional system message.
-        Uses ``settings.GROQ_API_KEY`` for Bearer token authentication and
-        defaults to ``"llama-3.3-70b-versatile"`` when *model* is not specified.
+        Tries the requested model first. On a 429 rate-limit response, waits 2
+        seconds then moves to the next model in ``MODELS_IN_ORDER``. Non-429
+        errors are retried on the same model up to ``max_retries`` times with
+        exponential back-off before giving up.
 
         Args:
             prompt: The user message text to send to the model.
             system_prompt: Optional system-level instruction added as the first
-                message in the conversation (e.g. ``"You are a code assistant."``).
+                message in the conversation.
             model: Groq model ID to use. Defaults to ``"llama-3.3-70b-versatile"``.
+            max_retries: Retries per model for non-429 transient errors.
+            retry_delay: Initial back-off delay (seconds) for transient retries.
+            max_tokens: Override the default token limit.
 
         Returns:
             On success::
 
                 {
-                    "status":  "success",
-                    "content": str,   # text of the first choice's message
-                    "model":   str,   # model ID echo'd from the response
-                    "usage":   dict,  # {"prompt_tokens": int, "completion_tokens": int, ...}
+                    "status":     "success",
+                    "content":    str,   # assistant message text
+                    "model":      str,   # model ID echoed from the response
+                    "model_used": str,   # same as "model" (explicit alias)
+                    "usage":      dict,  # prompt/completion token counts
                 }
 
-            On failure::
+            On failure (all models exhausted)::
 
                 {
                     "status": "error",
@@ -278,13 +291,14 @@ class APIConnectorTool:
                 }
         """
         if not settings.GROQ_API_KEY:
-            return {
-                "status": "error",
-                "error": "GROQ_API_KEY is not set in settings.",
-            }
+            return {"status": "error", "error": "GROQ_API_KEY is not set in settings."}
 
-        resolved_model = model or _GROQ_DEFAULT_MODEL
-        logger.info("Calling Groq model=%r prompt_len=%d", resolved_model, len(prompt))
+        requested_model = model or _GROQ_DEFAULT_MODEL
+
+        # Build cascade: requested model first, then remaining fallbacks in order.
+        models_to_try = [requested_model] + [
+            m for m in MODELS_IN_ORDER if m != requested_model
+        ]
 
         headers = {
             "Authorization": f"Bearer {settings.GROQ_API_KEY}",
@@ -295,57 +309,92 @@ class APIConnectorTool:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        body: dict = {
-            "model": resolved_model,
-            "messages": messages,
-            "max_tokens": max_tokens if max_tokens is not None else _GROQ_DEFAULT_MAX_TOKENS,
-        }
-
-        delay = retry_delay
+        resolved_max_tokens = max_tokens if max_tokens is not None else _GROQ_DEFAULT_MAX_TOKENS
         last_error: str = ""
-        for attempt in range(max_retries):
-            try:
-                response = await self._client.post(_GROQ_CHAT_URL, headers=headers, json=body)
 
-                if response.status_code == 429:
-                    last_error = response.text
+        for model_name in models_to_try:
+            body: dict = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": resolved_max_tokens,
+            }
+            logger.info("Calling Groq model=%r prompt_len=%d", model_name, len(prompt))
+
+            delay = retry_delay
+            for attempt in range(max_retries):
+                try:
+                    response = await self._client.post(
+                        _GROQ_CHAT_URL, headers=headers, json=body
+                    )
+
+                    if response.status_code == 429:
+                        last_error = response.text
+                        logger.warning(
+                            "Groq rate limit (429) on model=%r — switching to next model in 2s",
+                            model_name,
+                        )
+                        await asyncio.sleep(2)
+                        break  # exit retry loop, move to next model
+
+                    if not response.is_success:
+                        error_text = response.text
+                        logger.error(
+                            "Groq API error %d on model=%r: %s",
+                            response.status_code, model_name, error_text,
+                        )
+                        return {
+                            "status": "error",
+                            "error": f"HTTP {response.status_code}: {error_text}",
+                        }
+
+                    data = response.json()
+                    content = (
+                        data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                    usage = data.get("usage", {})
+                    used_model = data.get("model", model_name)
+
+                    logger.info(
+                        "Groq responded — model=%r prompt_tokens=%s completion_tokens=%s",
+                        used_model,
+                        usage.get("prompt_tokens"),
+                        usage.get("completion_tokens"),
+                    )
+                    if used_model != requested_model:
+                        logger.warning(
+                            "Groq fallback active: generated with %r instead of %r",
+                            used_model, requested_model,
+                        )
+
+                    return {
+                        "status": "success",
+                        "content": content,
+                        "model": used_model,
+                        "model_used": used_model,
+                        "usage": usage,
+                    }
+
+                except Exception as exc:
                     if attempt < max_retries - 1:
                         logger.warning(
-                            "Groq rate limit (429) on attempt %d/%d — retrying in %.1fs",
-                            attempt + 1, max_retries, delay,
+                            "call_groq model=%r attempt %d/%d failed (%s) — retrying in %.1fs",
+                            model_name, attempt + 1, max_retries, exc, delay,
                         )
                         await asyncio.sleep(delay)
                         delay *= 2
-                        continue
-                    logger.error("Groq rate limit exhausted after %d attempts.", max_retries)
-                    return {"status": "error", "error": f"Rate limit exceeded: {last_error}"}
+                    else:
+                        logger.exception(
+                            "call_groq model=%r all %d attempts failed: %s",
+                            model_name, max_retries, exc,
+                        )
+                        return {"status": "error", "error": str(exc)}
 
-                if not response.is_success:
-                    error_text = response.text
-                    logger.error("Groq API error %d: %s", response.status_code, error_text)
-                    return {
-                        "status": "error",
-                        "error": f"HTTP {response.status_code}: {error_text}",
-                    }
-
-                data = response.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                usage = data.get("usage", {})
-                logger.info(
-                    "Groq responded — model=%r prompt_tokens=%s completion_tokens=%s",
-                    data.get("model"), usage.get("prompt_tokens"), usage.get("completion_tokens"),
-                )
-                return {
-                    "status": "success",
-                    "content": content,
-                    "model": data.get("model", resolved_model),
-                    "usage": usage,
-                }
-            except Exception as exc:
-                logger.exception("call_groq attempt %d failed: %s", attempt + 1, exc)
-                return {"status": "error", "error": str(exc)}
-
-        return {"status": "error", "error": f"Rate limit exceeded after {max_retries} retries: {last_error}"}
+        return {
+            "status": "error",
+            "error": f"Rate limit exceeded on all models: {last_error}",
+        }
 
     async def close(self) -> None:
         """Close the underlying HTTP client and release all connections.

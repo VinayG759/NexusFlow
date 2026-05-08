@@ -111,25 +111,30 @@ async def seed_all_training_data(db: AsyncSession) -> None:
         logger.info("Seeded %d training examples", len(TRAINING_DATA))
 
 
+_startup_complete = False
+
+
+async def _background_startup() -> None:
+    global _startup_complete
+    try:
+        db = AsyncSessionFactory()
+        try:
+            await seed_all_error_patterns(db)
+            await seed_all_training_data(db)
+        finally:
+            await db.close()
+        logger.info("Background startup complete")
+    except Exception as e:
+        logger.warning("Background startup failed: %s", e)
+    _startup_complete = True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Starting %s v%s...", settings.APP_NAME, settings.APP_VERSION)
     await init_db()
-
-    db = AsyncSessionFactory()
-    try:
-        await seed_all_error_patterns(db)
-        await seed_all_training_data(db)
-    finally:
-        await db.close()
-
-    try:
-        rag_retriever.initialize()
-        logger.info("RAG system initialized")
-    except Exception as e:
-        logger.warning("RAG initialization failed (non-critical): %s", e)
-
     logger.info("%s is ready to accept requests.", settings.APP_NAME)
+    asyncio.create_task(_background_startup())
     yield
     logger.info("%s is shutting down. Goodbye.", settings.APP_NAME)
     await api_connector.close()
@@ -689,6 +694,38 @@ async def export_training_data(db: AsyncSession = Depends(get_db)) -> StreamingR
         media_type="application/x-ndjson",
         headers={"Content-Disposition": "attachment; filename=nexusflow_training.jsonl"},
     )
+
+
+@app.post("/training/export-jsonl")
+async def export_jsonl(db: AsyncSession = Depends(get_db)):
+    from src.utils.finetune_pipeline import finetune_pipeline
+    file_path = await finetune_pipeline.export_training_data(db)
+    validation = finetune_pipeline.validate_jsonl(file_path)
+    return {
+        "file": str(file_path),
+        "validation": validation,
+        "next_step": "POST /training/submit-finetune when ready_for_training=true"
+    }
+
+
+@app.post("/training/submit-finetune")
+async def submit_finetune(db: AsyncSession = Depends(get_db)):
+    from src.utils.finetune_pipeline import finetune_pipeline
+    file_path = await finetune_pipeline.export_training_data(db)
+    result = await finetune_pipeline.submit_to_groq(file_path)
+    return result
+
+
+@app.get("/training/finetune-status/{job_id}")
+async def finetune_status(job_id: str):
+    from src.utils.finetune_pipeline import finetune_pipeline
+    return await finetune_pipeline.check_job_status(job_id)
+
+
+@app.post("/training/activate-model")
+async def activate_model(model_id: str):
+    from src.utils.finetune_pipeline import finetune_pipeline
+    return finetune_pipeline.activate_fine_tuned_model(model_id)
 
 
 # ── Setup script helpers ──────────────────────────────────────────────────────
