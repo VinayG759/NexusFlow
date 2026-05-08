@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # DATABASE_URL must be set in the environment or .env file before startup.
     # Example: postgresql+psycopg2://user:password@localhost:5432/nexusflow
 
-    DATABASE_URL: str
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:vinay2004@localhost:5432/nexusflow_db"
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
 
