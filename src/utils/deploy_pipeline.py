@@ -3,10 +3,10 @@ NexusFlow One-Click Deployment Pipeline
 Deploys generated projects to GitHub + Render + Vercel automatically.
 """
 
-import os
 import httpx
 import base64
 import json
+from src.config.settings import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -14,10 +14,10 @@ logger = get_logger(__name__)
 
 class DeployPipeline:
     def __init__(self):
-        self.github_token = os.getenv("GITHUB_TOKEN", "")
-        self.render_api_key = os.getenv("RENDER_API_KEY", "")
-        self.vercel_token = os.getenv("VERCEL_TOKEN", "")
-        self.github_username = os.getenv("GITHUB_USERNAME", "")
+        self.github_token = settings.GITHUB_TOKEN
+        self.render_api_key = settings.RENDER_API_KEY
+        self.vercel_token = settings.VERCEL_TOKEN
+        self.github_username = settings.GITHUB_USERNAME
         logger.info("DeployPipeline initialised")
 
     async def deploy_project(self, project_name: str, files: list[dict]) -> dict:
@@ -58,7 +58,7 @@ class DeployPipeline:
             project_name,
             github_result["repo_url"],
             github_result["repo_name"],
-            results.get("render_url", "http://localhost:8001")
+            results["render_url"] or "http://localhost:8001"
         )
         if vercel_result["status"] == "success":
             results["vercel_url"] = vercel_result["url"]
@@ -143,34 +143,52 @@ class DeployPipeline:
         }
 
         async with httpx.AsyncClient(timeout=30) as client:
+            # Fetch owner ID (required by Render API v1)
+            owners_resp = await client.get("https://api.render.com/v1/owners", headers=headers)
+            if owners_resp.status_code != 200:
+                return {"status": "error", "error": f"Failed to get Render owner ID: {owners_resp.text}"}
+            owners = owners_resp.json()
+            owner_id = owners[0]["owner"]["id"] if owners else None
+            if not owner_id:
+                return {"status": "error", "error": "No Render owner account found"}
+
             response = await client.post(
                 "https://api.render.com/v1/services",
                 headers=headers,
                 json={
                     "type": "web_service",
                     "name": f"{project_name}-backend",
+                    "ownerId": owner_id,
                     "repo": repo_url,
                     "branch": "main",
-                    "rootDir": "backend",
-                    "buildCommand": "pip install -r requirements.txt",
-                    "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",
-                    "envVars": [
-                        {"key": "PYTHON_VERSION", "value": "3.11.0"},
-                        {"key": "DATABASE_URL", "value": os.getenv("DATABASE_URL", "")}
-                    ],
-                    "plan": "free"
+                    "serviceDetails": {
+                        "env": "python",
+                        "plan": "free",
+                        "pullRequestPreviewsEnabled": "no",
+                        "rootDir": "backend",
+                        "envSpecificDetails": {
+                            "buildCommand": "pip install -r requirements.txt",
+                            "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT"
+                        },
+                        "envVars": [
+                            {"key": "PYTHON_VERSION", "value": "3.11.0"},
+                            {"key": "DATABASE_URL", "value": settings.DATABASE_URL}
+                        ]
+                    }
                 }
             )
 
             if response.status_code in (200, 201):
                 data = response.json()
                 service_url = data.get("service", {}).get("serviceDetails", {}).get("url", "")
-                return {"status": "success", "url": f"https://{service_url}"}
+                if service_url and not service_url.startswith("http"):
+                    service_url = f"https://{service_url}"
+                return {"status": "success", "url": service_url}
             else:
                 return {"status": "error", "error": f"Render API error: {response.text}"}
 
     async def _deploy_to_vercel(self, project_name: str, repo_url: str, repo_name: str, backend_url: str) -> dict:
-        """Deploy frontend to Vercel via API."""
+        """Deploy frontend to Vercel via API (create project → trigger deployment)."""
         if not self.vercel_token:
             return {"status": "error", "error": "VERCEL_TOKEN not set"}
 
@@ -179,33 +197,71 @@ class DeployPipeline:
             "Content-Type": "application/json"
         }
 
-        github_username = self.github_username
+        project_slug = f"{repo_name}-frontend"
 
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                "https://api.vercel.com/v1/integrations/deploy",
+            # Step 1: Create Vercel project linked to GitHub repo
+            create_resp = await client.post(
+                "https://api.vercel.com/v9/projects",
                 headers=headers,
                 json={
-                    "name": f"{project_name}-frontend",
-                    "gitSource": {
+                    "name": project_slug,
+                    "gitRepository": {
                         "type": "github",
-                        "repoId": repo_name,
-                        "ref": "main"
+                        "repo": f"{self.github_username}/{repo_name}"
                     },
                     "rootDirectory": "frontend",
                     "buildCommand": "npm run build",
                     "outputDirectory": "dist",
-                    "envs": [
-                        {"key": "VITE_API_URL", "value": backend_url, "target": ["production"]}
+                    "environmentVariables": [
+                        {
+                            "key": "VITE_API_URL",
+                            "value": backend_url,
+                            "type": "plain",
+                            "target": ["production"]
+                        }
                     ]
                 }
             )
 
-            if response.status_code in (200, 201):
-                data = response.json()
-                return {"status": "success", "url": data.get("url", "")}
+            if create_resp.status_code == 409:
+                # Project already exists — fetch its ID
+                get_resp = await client.get(
+                    f"https://api.vercel.com/v9/projects/{project_slug}",
+                    headers=headers
+                )
+                project_id = get_resp.json().get("id", "") if get_resp.status_code == 200 else ""
+            elif create_resp.status_code in (200, 201):
+                project_id = create_resp.json().get("id", "")
             else:
-                return {"status": "error", "error": f"Vercel API error: {response.text}"}
+                return {"status": "error", "error": f"Vercel project creation error: {create_resp.text}"}
+
+            if not project_id:
+                return {"status": "error", "error": "Could not obtain Vercel project ID"}
+
+            # Step 2: Trigger deployment from GitHub main branch
+            deploy_resp = await client.post(
+                "https://api.vercel.com/v13/deployments",
+                headers=headers,
+                json={
+                    "name": project_slug,
+                    "project": project_id,
+                    "gitSource": {
+                        "type": "github",
+                        "org": self.github_username,
+                        "repo": repo_name,
+                        "ref": "main"
+                    },
+                    "target": "production"
+                }
+            )
+
+            if deploy_resp.status_code in (200, 201):
+                data = deploy_resp.json()
+                url = data.get("url", "")
+                return {"status": "success", "url": f"https://{url}" if url and not url.startswith("http") else url}
+            else:
+                return {"status": "error", "error": f"Vercel deploy error: {deploy_resp.text}"}
 
     async def get_deploy_status(self, service_id: str) -> dict:
         """Check deployment status on Render."""

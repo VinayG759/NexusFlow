@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # Obtain from https://console.groq.com — never commit the real value.
     GROQ_API_KEY: str = ""
 
+    # ── Deployment ────────────────────────────────────────────────────────────
+    GITHUB_TOKEN: str = ""
+    GITHUB_USERNAME: str = ""
+    RENDER_API_KEY: str = ""
+    VERCEL_TOKEN: str = ""
+
 
 # Module-level singleton — import this directly instead of instantiating Settings yourself.
 settings = Settings()
