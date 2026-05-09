@@ -6,6 +6,7 @@ Deploys generated projects to GitHub + Render + Vercel automatically.
 import httpx
 import base64
 import json
+import time
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
@@ -208,6 +209,30 @@ class DeployPipeline:
                     json=payload
                 )
 
+            # Push vercel.json to frontend folder
+            vercel_config = {
+                "buildCommand": "npm run build",
+                "installCommand": "npm install --legacy-peer-deps",
+                "outputDirectory": "dist",
+                "framework": "vite"
+            }
+            vercel_json_path = "frontend/vercel.json"
+            get_vj = await client.get(
+                f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{vercel_json_path}",
+                headers=headers
+            )
+            vercel_payload = {
+                "message": "Add vercel.json",
+                "content": base64.b64encode(json.dumps(vercel_config, indent=2).encode()).decode()
+            }
+            if get_vj.status_code == 200:
+                vercel_payload["sha"] = get_vj.json().get("sha", "")
+            await client.put(
+                f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{vercel_json_path}",
+                headers=headers,
+                json=vercel_payload
+            )
+
             return {
                 "status": "success",
                 "repo_url": repo_url,
@@ -234,12 +259,13 @@ class DeployPipeline:
             if not owner_id:
                 return {"status": "error", "error": "No Render owner account found"}
 
+            service_name = f"{project_name}-backend-{int(time.time()) % 10000}"
             response = await client.post(
                 "https://api.render.com/v1/services",
                 headers=headers,
                 json={
                     "type": "web_service",
-                    "name": f"{project_name}-backend",
+                    "name": service_name,
                     "ownerId": owner_id,
                     "repo": repo_url,
                     "branch": "main",
@@ -266,6 +292,22 @@ class DeployPipeline:
                 if service_url and not service_url.startswith("http"):
                     service_url = f"https://{service_url}"
                 return {"status": "success", "url": service_url}
+            elif response.status_code == 400 and "already in use" in response.text:
+                list_response = await client.get(
+                    "https://api.render.com/v1/services",
+                    headers=headers,
+                    params={"limit": 20}
+                )
+                if list_response.status_code == 200:
+                    services = list_response.json()
+                    for svc in services:
+                        svc_data = svc.get("service", {})
+                        if project_name.lower().replace(" ", "-") in svc_data.get("name", "").lower():
+                            slug = svc_data.get("serviceDetails", {}).get("url", "")
+                            url = f"https://{slug}" if slug and not slug.startswith("http") else slug
+                            logger.info("Render service already exists: %s", url)
+                            return {"status": "success", "url": url}
+                return {"status": "error", "error": "Service exists but could not find URL"}
             else:
                 return {"status": "error", "error": f"Render API error: {response.text}"}
 
@@ -294,13 +336,14 @@ class DeployPipeline:
                     },
                     "rootDirectory": "frontend",
                     "buildCommand": "npm run build",
+                    "installCommand": "npm install --legacy-peer-deps",
                     "outputDirectory": "dist",
                     "environmentVariables": [
                         {
                             "key": "VITE_API_URL",
                             "value": backend_url,
                             "type": "plain",
-                            "target": ["production"]
+                            "target": ["production", "preview", "development"]
                         }
                     ]
                 }
