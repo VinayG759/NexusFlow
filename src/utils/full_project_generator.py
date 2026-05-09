@@ -126,7 +126,11 @@ root.render(
 );
 """,
 
-    "frontend/src/index.css": """* {{
+    "frontend/src/index.css": """@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {{
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -170,7 +174,6 @@ input, textarea, select {{ outline: none; font-family: inherit; }}
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{project_name}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
   </head>
   <body>
     <div id="root"></div>
@@ -193,6 +196,22 @@ export default defineConfig({{
     }}
   }},
 }})
+""",
+
+    "frontend/tailwind.config.js": """/** @type {{import('tailwindcss').Config}} */
+export default {{
+  content: ['./index.html', './src/**/*.{{js,ts,jsx,tsx}}'],
+  theme: {{ extend: {{}} }},
+  plugins: [],
+}}
+""",
+
+    "frontend/postcss.config.js": """export default {{
+  plugins: {{
+    tailwindcss: {{}},
+    autoprefixer: {{}},
+  }},
+}}
 """,
 
     "frontend/src/declarations.d.ts": """declare module '*.css';
@@ -644,7 +663,7 @@ COLOR SYSTEM — use consistently:
 
 NEVER use inline styles.
 NEVER use unstyled HTML.
-ALWAYS use TailwindCSS classes from the CDN already added to index.html.
+ALWAYS use TailwindCSS classes. TailwindCSS is installed via npm (tailwindcss + postcss + autoprefixer) — do NOT use the CDN.
 
 51. App.tsx MUST import and use React Router for navigation:
 import { BrowserRouter, Routes, Route, Link, useNavigate } from 'react-router-dom';
@@ -688,6 +707,11 @@ Frontend: src/App.tsx, src/index.tsx, src/index.css, vite.config.ts, package.jso
 - Navigation uses <Link> not <a>
 - Protected routes redirect to /login if not authenticated
 - Always import: import { BrowserRouter, Routes, Route, Link, useNavigate } from 'react-router-dom'
+
+The / route MUST always show content. NEVER leave / route empty or blank.
+If app has auth: / should redirect to /dashboard if logged in, else redirect to /login.
+If app has no auth: / is the main feature page (list, dashboard, home screen).
+A blank / route will cause a blank Vercel deployment — this is a critical error.
 """
 
 
@@ -878,6 +902,9 @@ class FullProjectGenerator:
                         "@types/react": "^18.0.0",
                         "@types/react-dom": "^18.0.0",
                         "@types/node": "^18.0.0",
+                        "tailwindcss": "^3.4.0",
+                        "autoprefixer": "^10.4.0",
+                        "postcss": "^8.4.0",
                     }
                     for dep, ver in runtime_deps.items():
                         pkg["dependencies"].setdefault(dep, ver)
