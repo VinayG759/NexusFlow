@@ -652,6 +652,21 @@ ALWAYS have at minimum these routes:
 - /about or second feature page
 
 Navigation bar MUST use Link components not <a> tags.
+
+52. For SaaS applications ALWAYS generate these files:
+Backend: main.py, database.py, models.py, routes.py, schemas.py, auth.py, requirements.txt, .env.example
+Frontend: src/App.tsx, src/index.tsx, src/index.css, src/pages/Login.tsx, src/pages/Register.tsx, src/pages/Dashboard.tsx, src/layouts/DashboardLayout.tsx, src/contexts/AuthContext.tsx, vite.config.ts, package.json, tsconfig.json, public/index.html
+
+For simple apps ALWAYS generate:
+Backend: main.py, database.py, models.py, routes.py, schemas.py, requirements.txt, .env.example
+Frontend: src/App.tsx, src/index.tsx, src/index.css, vite.config.ts, package.json, tsconfig.json, public/index.html
+
+53. Multi-page React apps MUST use React Router:
+- App.tsx wraps everything in <BrowserRouter>
+- Each feature gets its own page component in src/pages/
+- Navigation uses <Link> not <a>
+- Protected routes redirect to /login if not authenticated
+- Always import: import { BrowserRouter, Routes, Route, Link, useNavigate } from 'react-router-dom'
 """
 
 
@@ -1124,6 +1139,38 @@ class FullProjectGenerator:
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
+    def _detect_project_type(self, problem_statement: str) -> dict:
+        """Analyse the problem statement and return project type + required features."""
+        problem_lower = problem_statement.lower()
+
+        project_type = "simple"
+        features = []
+
+        if any(w in problem_lower for w in ["saas", "subscription", "billing", "multi-tenant", "team"]):
+            project_type = "saas"
+            features += ["auth", "dashboard", "payments", "settings"]
+
+        if any(w in problem_lower for w in ["auth", "login", "register", "user", "account", "profile", "password"]):
+            features.append("auth")
+            if project_type == "simple":
+                project_type = "auth_app"
+
+        if any(w in problem_lower for w in ["dashboard", "admin", "analytics", "stats", "chart", "report"]):
+            features.append("dashboard")
+
+        if any(w in problem_lower for w in ["payment", "stripe", "subscription", "billing", "price", "plan"]):
+            features.append("payments")
+
+        if any(w in problem_lower for w in ["real-time", "realtime", "chat", "live", "websocket", "notification"]):
+            features.append("realtime")
+
+        if any(w in problem_lower for w in ["upload", "file", "image", "photo", "attachment", "document"]):
+            features.append("file_upload")
+
+        features = list(set(features))
+
+        return {"type": project_type, "features": features}
+
     def _build_user_prompt(self, problem_statement: str, options: dict, rag_context: str = "") -> str:
         """Compose the user-facing prompt from the problem statement and options.
 
@@ -1152,6 +1199,20 @@ class FullProjectGenerator:
         if extras:
             lines.append("Additional requirements:")
             lines.extend(f"  - {e}" for e in extras)
+
+        project_info = self._detect_project_type(problem_statement)
+        if project_info["features"]:
+            feature_instructions = (
+                f"\n=== PROJECT TYPE: {project_info['type'].upper()} ===\n"
+                f"Required features to implement: {', '.join(project_info['features'])}\n"
+                + ("\nINCLUDE FULL JWT AUTH SYSTEM: Register, Login, Protected routes, Token storage" if "auth" in project_info["features"] else "")
+                + ("\nINCLUDE DASHBOARD LAYOUT: Sidebar navigation, Stats cards, Data tables" if "dashboard" in project_info["features"] else "")
+                + ("\nINCLUDE STRIPE PAYMENTS: Checkout session, Webhook handler, Subscription status" if "payments" in project_info["features"] else "")
+                + ("\nINCLUDE WEBSOCKET: Real-time updates, Connection manager, Room-based messaging" if "realtime" in project_info["features"] else "")
+                + ("\nINCLUDE FILE UPLOAD: Multipart form, File validation, Storage handling" if "file_upload" in project_info["features"] else "")
+            )
+            lines.append(feature_instructions)
+
         lines.append(
             "\nGenerate the complete project now. Return only the JSON object — nothing else."
         )

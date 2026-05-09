@@ -20,6 +20,7 @@ Usage::
 """
 
 import asyncio
+
 import httpx
 
 from src.config.settings import settings
@@ -41,6 +42,11 @@ _GROQ_DEFAULT_MAX_TOKENS = 4096
 MODELS_IN_ORDER = [
     "llama-3.3-70b-versatile",   # 128k ctx, ~14k TPM free tier
 ]
+
+# Global semaphore: serialise all Groq calls so concurrent builds don't exhaust
+# the 12k TPM limit simultaneously (thundering-herd on 429 retries).
+# Lazily initialised inside call_groq() so it binds to the running event loop.
+_groq_semaphore: asyncio.Semaphore | None = None
 
 
 class APIConnectorTool:
@@ -292,6 +298,33 @@ class APIConnectorTool:
         if not settings.GROQ_API_KEY:
             return {"status": "error", "error": "GROQ_API_KEY is not set in settings."}
 
+        # Acquire the global semaphore to prevent concurrent builds from hammering the
+        # 12k TPM limit simultaneously.  Only one Groq call runs at a time; others queue
+        # here and proceed after the current holder releases (on success OR after its
+        # own 429-retry wait), naturally spacing requests across TPM windows.
+        global _groq_semaphore
+        if _groq_semaphore is None:
+            _groq_semaphore = asyncio.Semaphore(1)
+        async with _groq_semaphore:
+            return await self._call_groq_inner(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
+                max_tokens=max_tokens,
+            )
+
+    async def _call_groq_inner(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        max_retries: int = 3,
+        retry_delay: float = 5.0,
+        max_tokens: int | None = None,
+    ) -> dict:
+        """Inner Groq call — runs under the global semaphore acquired by call_groq."""
         requested_model = model or _GROQ_DEFAULT_MODEL
 
         # Build cascade: requested model first, then remaining fallbacks in order.
@@ -411,10 +444,59 @@ class APIConnectorTool:
                         )
                         return {"status": "error", "error": str(exc)}
 
-        return {
-            "status": "error",
-            "error": f"Rate limit exceeded on all models: {last_error}",
-        }
+        # Try Claude as last resort
+        logger.warning("All Groq models exhausted, trying Claude API fallback...")
+        claude_result = await self._call_claude_fallback(
+            prompt,
+            system_prompt or "",
+            max_tokens if max_tokens is not None else _GROQ_DEFAULT_MAX_TOKENS,
+        )
+        if claude_result["status"] == "success":
+            return claude_result
+        return {"status": "error", "error": "All LLMs exhausted"}
+
+    async def _call_claude_fallback(
+        self,
+        prompt: str,
+        system_prompt: str,
+        max_tokens: int = 8000,
+    ) -> dict:
+        """Use Claude API as fallback when Groq TPD is exhausted."""
+        api_key = settings.ANTHROPIC_API_KEY
+        if not api_key:
+            return {"status": "error", "error": "No ANTHROPIC_API_KEY set"}
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-sonnet-4-20250514",
+                        "max_tokens": max_tokens,
+                        "system": system_prompt,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data["content"][0]["text"]
+                    logger.info("Claude fallback succeeded — model=claude-sonnet-4-20250514")
+                    return {
+                        "status": "success",
+                        "content": content,
+                        "model_used": "claude-sonnet-fallback",
+                    }
+                else:
+                    logger.error("Claude fallback error %d: %s", response.status_code, response.text)
+                    return {"status": "error", "error": f"Claude API error: {response.text}"}
+        except Exception as exc:
+            logger.exception("Claude fallback failed: %s", exc)
+            return {"status": "error", "error": str(exc)}
 
     async def close(self) -> None:
         """Close the underlying HTTP client and release all connections.

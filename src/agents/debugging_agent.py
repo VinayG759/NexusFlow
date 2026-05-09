@@ -613,6 +613,9 @@ class DebuggingAgent:
         fm = self._fix_missing_css_imports(fm, issues, fixes)
         fm = self._fix_missing_packages(fm, issues, fixes)
         fm = self._fix_missing_app(fm, fixes)
+        fm = self._fix_process_env(fm, fixes)
+        fm = self._fix_missing_default_exports(fm, fixes)
+        fm = self._fix_missing_local_imports(fm, fixes)  # run last — depends on all other file-gen fixers
 
         # Drop issues that structural fixers already resolved so they never reach errors
         resolved: set[str] = set()
@@ -1170,6 +1173,173 @@ class DebuggingAgent:
             fixes.append(f"Fixed TypeScript catch type annotations in: {', '.join(changed)}")
         return fm
 
+    def _fix_process_env(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Replace process.env.REACT_APP_* with import.meta.env.VITE_* in frontend files.
+
+        Vite does not expose process.env to the browser; accessing it crashes at runtime
+        with 'Uncaught ReferenceError: process is not defined'.
+        """
+        changed: list[str] = []
+        for path in list(fm.keys()):
+            if not (path.startswith("frontend/") and path.endswith((".tsx", ".ts", ".js", ".jsx"))):
+                continue
+            content = fm[path]
+            orig = content
+            # API URL: add the fallback default so the value is never undefined
+            content = re.sub(
+                r"process\.env\.REACT_APP_API_URL",
+                "import.meta.env.VITE_API_URL || 'http://localhost:8001'",
+                content,
+            )
+            # Any other REACT_APP_ variable — straightforward rename
+            content = re.sub(
+                r"process\.env\.REACT_APP_(\w+)",
+                lambda m: f"import.meta.env.VITE_{m.group(1)}",
+                content,
+            )
+            if content != orig:
+                fm[path] = content
+                changed.append(path)
+        if changed:
+            fixes.append(
+                f"Fixed process.env.REACT_APP_* → import.meta.env.VITE_* in: {', '.join(changed)}"
+            )
+        return fm
+
+    def _fix_missing_default_exports(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Add a missing default export to any file that is default-imported but lacks one.
+
+        Vite fails with "'default' is not exported by X, imported by Y" when a file is
+        consumed with a bare import (e.g. import App from './App') but has no
+        'export default' statement. The LLM often writes named exports only.
+        """
+        for path, content in list(fm.items()):
+            if not (path.startswith("frontend/src/") and path.endswith((".tsx", ".ts", ".jsx", ".js"))):
+                continue
+            file_dir = "/".join(path.split("/")[:-1])
+            for m in re.finditer(
+                r"""import\s+(\w+)\s+from\s+['"](\.[^'"]+)['"]""",
+                content,
+            ):
+                imp_name = m.group(1)
+                imp_path = m.group(2)
+                # Resolve the relative path manually (pathlib won't normalise '..')
+                parts = (file_dir + "/" + imp_path).split("/")
+                resolved: list[str] = []
+                for part in parts:
+                    if part == "..":
+                        if resolved:
+                            resolved.pop()
+                    elif part and part != ".":
+                        resolved.append(part)
+                base = "/".join(resolved)
+                target: str | None = None
+                for cand in [
+                    base, f"{base}.tsx", f"{base}.ts", f"{base}.jsx", f"{base}.js",
+                    f"{base}/index.tsx", f"{base}/index.ts",
+                ]:
+                    if cand in fm:
+                        target = cand
+                        break
+                if not target:
+                    continue
+                target_content = fm[target]
+                if re.search(r"\bexport\s+default\b", target_content):
+                    continue
+                # File exists but has no default export — add one.
+                # Prefer a named export whose name matches the import identifier.
+                if re.search(
+                    rf"\bexport\s+(?:function|const|class)\s+{re.escape(imp_name)}\b",
+                    target_content,
+                ):
+                    fm[target] = target_content.rstrip() + f"\nexport default {imp_name};\n"
+                    fixes.append(f"Added 'export default {imp_name}' to {target}")
+                else:
+                    # Fall back to the first exported component-like name (PascalCase)
+                    comp_m = re.search(
+                        r"\bexport\s+(?:function|const|class)\s+([A-Z]\w*)\b",
+                        target_content,
+                    )
+                    if comp_m:
+                        comp_name = comp_m.group(1)
+                        fm[target] = target_content.rstrip() + f"\nexport default {comp_name};\n"
+                        fixes.append(f"Added 'export default {comp_name}' to {target}")
+                    else:
+                        # No usable named export — inject a minimal default at the end
+                        fm[target] = target_content.rstrip() + f"\nexport default function {imp_name}() {{ return null; }}\n"
+                        fixes.append(f"Added fallback 'export default function {imp_name}' to {target}")
+        return fm
+
+    def _fix_missing_local_imports(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Create stub components for relative imports that don't resolve to an existing file.
+
+        When the LLM references a component it forgot to generate (e.g. a hook or sub-page),
+        'vite build' fails with 'Could not resolve ./ComponentName'. This fixer creates a
+        minimal stub so the build succeeds; the stub can be replaced with real code later.
+        """
+        for path, content in list(fm.items()):
+            if not (path.startswith("frontend/src/") and path.endswith((".tsx", ".ts", ".jsx", ".js"))):
+                continue
+            file_dir = "/".join(path.split("/")[:-1])
+            for m in re.finditer(
+                r"""import\s+[^'"]+from\s+['"](\.[^'"]+)['"]""",
+                content,
+            ):
+                imp = m.group(1)
+                # Skip asset imports — they are handled by other fixers or Vite plugins
+                if re.search(r"\.(css|scss|sass|less|svg|png|jpg|jpeg|ico|json|gif|webp|woff|ttf)$", imp):
+                    continue
+                # Resolve '../' and './' manually (pathlib does not normalise '..' in relative paths)
+                parts = (file_dir + "/" + imp).split("/")
+                resolved_parts: list[str] = []
+                for part in parts:
+                    if part == "..":
+                        if resolved_parts:
+                            resolved_parts.pop()
+                    elif part and part != ".":
+                        resolved_parts.append(part)
+                base = "/".join(resolved_parts)
+                # Check all extension variants
+                candidates = [
+                    base, f"{base}.tsx", f"{base}.ts", f"{base}.jsx", f"{base}.js",
+                    f"{base}/index.tsx", f"{base}/index.ts",
+                ]
+                if any(c in fm for c in candidates):
+                    continue
+                target = f"{base}.tsx"
+                if target in fm:
+                    continue
+
+                # Derive what names to export from the import statement
+                import_text = m.group(0)
+                named_names: list[str] = []
+                for group in re.findall(r"\{([^}]+)\}", import_text):
+                    for raw in group.split(","):
+                        # Handle "X as Y" — export both X and Y to be safe
+                        clean = raw.strip().split(" as ")[-1].strip()
+                        if clean and re.match(r"^[A-Za-z_]\w*$", clean):
+                            named_names.append(clean)
+
+                comp_name = Path(base).stem
+                comp_name = re.sub(r"[^a-zA-Z0-9]", "", comp_name)
+                comp_name = comp_name[0].upper() + comp_name[1:] if comp_name else "Component"
+
+                lines: list[str] = ["import React from 'react';", ""]
+                for name in named_names:
+                    # Heuristic: lowercase names are likely hooks — export as functions
+                    if name and name[0].islower():
+                        lines.append(f"export const {name} = () => ({{}} as any);")
+                    else:
+                        lines.append(f"export const {name}: React.FC = () => <div />;")
+                if named_names:
+                    lines.append("")
+                lines.append(f"const {comp_name}: React.FC = () => <div />;")
+                lines.append(f"export default {comp_name};")
+
+                fm[target] = "\n".join(lines) + "\n"
+                fixes.append(f"Created stub for missing local import: {target}")
+        return fm
+
     def _fix_fastapi_imports(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
         _FASTAPI_IMPORTS: dict[str, str] = {
             "APIRouter":       "from fastapi import APIRouter",
@@ -1194,12 +1364,43 @@ class DebuggingAgent:
             "DeclarativeBase": _ORM_IMPORT,
             "relationship":   _ORM_IMPORT,
             "ForeignKey":     "from sqlalchemy import ForeignKey",
+            # Column types — LLM frequently forgets individual type imports
+            "Column":         "from sqlalchemy import Column",
+            "Boolean":        "from sqlalchemy import Boolean",
+            "Integer":        "from sqlalchemy import Integer",
+            "String":         "from sqlalchemy import String",
+            "Float":          "from sqlalchemy import Float",
+            "DateTime":       "from sqlalchemy import DateTime",
+            "Text":           "from sqlalchemy import Text",
+            "Date":           "from sqlalchemy import Date",
+            "Numeric":        "from sqlalchemy import Numeric",
+            "JSON":           "from sqlalchemy import JSON",
         }
         for path in list(fm.keys()):
             if not (path.startswith("backend/") and path.endswith(".py")):
                 continue
             content = fm[path]
             original = content
+
+            # Remove ORM-only symbols wrongly placed in sqlalchemy.ext.asyncio imports.
+            # LLM often writes "from sqlalchemy.ext.asyncio import Mapped" — Mapped
+            # belongs in sqlalchemy.orm. Stripping them lets _SA_IMPORTS add the
+            # correct import below.
+            _ORM_ONLY = frozenset({"Mapped", "mapped_column", "DeclarativeBase", "relationship"})
+            _cleaned: list[str] = []
+            for _line in content.splitlines():
+                if _line.startswith("from sqlalchemy.ext.asyncio import "):
+                    _syms = [s.strip() for s in _line[len("from sqlalchemy.ext.asyncio import "):].split(",")]
+                    _valid = [s for s in _syms if s not in _ORM_ONLY]
+                    if _valid:
+                        _cleaned.append(f"from sqlalchemy.ext.asyncio import {', '.join(_valid)}")
+                    # else drop the line entirely — no valid asyncio symbols remain
+                else:
+                    _cleaned.append(_line)
+            content = "\n".join(_cleaned)
+            if content and not content.endswith("\n"):
+                content += "\n"
+
             to_add: list[str] = []
             for symbol, import_line in {**_FASTAPI_IMPORTS, **_SA_IMPORTS}.items():
                 module = import_line.split(" import ")[0].replace("from ", "")
@@ -1371,10 +1572,12 @@ class DebuggingAgent:
 
         return files, ""
 
-    def _create_database(self, project_name: str, files: list[dict]) -> bool:
-        """Auto-create PostgreSQL database if it doesn't exist (3 attempts, 2s apart)."""
-        if psycopg2 is None:
-            logger.warning("%s psycopg2 not installed — skipping DB creation", self.agent_name)
+    async def _create_database(self, project_name: str, files: list[dict]) -> bool:
+        """Auto-create PostgreSQL database if it doesn't exist (asyncpg, 3 attempts)."""
+        try:
+            import asyncpg as _asyncpg
+        except ImportError:
+            logger.warning("%s asyncpg not importable — skipping DB creation", self.agent_name)
             return False
 
         db_name = project_name.lower().replace("-", "_").replace(" ", "_")
@@ -1388,30 +1591,29 @@ class DebuggingAgent:
 
         for attempt in range(1, 4):
             try:
-                conn = psycopg2.connect(
-                    dbname="postgres",
-                    user="postgres",
-                    password="vinay2004",
-                    host="localhost",
-                    port=5432,
+                conn = await _asyncpg.connect(
+                    host="localhost", port=5432,
+                    user="postgres", password="vinay2004",
+                    database="postgres",
                 )
-                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
-                cur = conn.cursor()
-                cur.execute(f"SELECT 1 FROM pg_database WHERE datname = '{db_name}'")
-                if not cur.fetchone():
-                    cur.execute(f'CREATE DATABASE "{db_name}"')
-                    logger.info("%s created database: %s", self.agent_name, db_name)
-                else:
-                    logger.info("%s database already exists: %s", self.agent_name, db_name)
-                cur.close()
-                conn.close()
-                return True
+                try:
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM pg_database WHERE datname = $1", db_name
+                    )
+                    if not exists:
+                        await conn.execute(f'CREATE DATABASE "{db_name}"')
+                        logger.info("%s created database: %s", self.agent_name, db_name)
+                    else:
+                        logger.info("%s database already exists: %s", self.agent_name, db_name)
+                    return True
+                finally:
+                    await conn.close()
             except Exception as e:
                 logger.warning(
                     "%s DB creation attempt %d/3 failed: %s", self.agent_name, attempt, e
                 )
                 if attempt < 3:
-                    time.sleep(2)
+                    await asyncio.sleep(2)
         return False
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1463,7 +1665,7 @@ class DebuggingAgent:
                             k, _, v = line.partition("=")
                             env.setdefault(k.strip(), v.strip())
 
-                self._create_database(project_name, files)
+                await self._create_database(project_name, files)
 
                 _port_sock.close()  # release socket so uvicorn can bind the same port
                 proc = subprocess.Popen(
