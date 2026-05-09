@@ -1340,6 +1340,80 @@ class DebuggingAgent:
 
                 fm[target] = "\n".join(lines) + "\n"
                 fixes.append(f"Created stub for missing local import: {target}")
+
+        # Auth-aware stub: inject Register.tsx if auth detected but page is missing
+        has_auth = any(p.endswith(("auth.py", "AuthContext.tsx")) for p in fm)
+        has_login = any("pages/Login.tsx" in p for p in fm)
+        has_register = any("pages/Register.tsx" in p for p in fm)
+        if has_auth and has_login and not has_register:
+            _REGISTER_STUB = """import React, { useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
+import axios from 'axios';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
+
+export default function Register() {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      await axios.post(`${API_URL}/api/auth/register`, { name, email, password });
+      navigate('/login');
+    } catch (err: unknown) {
+      setError('Registration failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Create account</h1>
+        <p className="text-gray-500 mb-8">Sign up to get started</p>
+        {error && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6">{error}</div>}
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+            <input type="text" value={name} onChange={e => setName(e.target.value)} required
+              className="w-full border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500"
+              placeholder="Your name" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required
+              className="w-full border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500"
+              placeholder="you@example.com" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)} required
+              className="w-full border-2 border-gray-200 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500"
+              placeholder="••••••••" />
+          </div>
+          <button type="submit" disabled={loading}
+            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors">
+            {loading ? 'Creating account...' : 'Create Account'}
+          </button>
+        </form>
+        <p className="mt-6 text-center text-gray-500">
+          Already have an account? <Link to="/login" className="text-blue-600 font-semibold hover:underline">Sign in</Link>
+        </p>
+      </div>
+    </div>
+  );
+}
+"""
+            fm["frontend/src/pages/Register.tsx"] = _REGISTER_STUB
+            fixes.append("Created Register.tsx stub (auth detected, Login.tsx present, Register.tsx missing)")
         return fm
 
     def _fix_fastapi_imports(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:

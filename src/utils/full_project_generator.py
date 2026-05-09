@@ -660,6 +660,12 @@ Navigation bar MUST use Link components not <a> tags.
 Backend: main.py, database.py, models.py, routes.py, schemas.py, auth.py, requirements.txt, .env.example
 Frontend: src/App.tsx, src/index.tsx, src/index.css, src/pages/Login.tsx, src/pages/Register.tsx, src/pages/Dashboard.tsx, src/layouts/DashboardLayout.tsx, src/contexts/AuthContext.tsx, vite.config.ts, package.json, tsconfig.json, public/index.html
 
+Auth file checklist (ALL required when auth is included):
+- frontend/src/pages/Login.tsx (REQUIRED)
+- frontend/src/pages/Register.tsx (REQUIRED when auth is included)
+- frontend/src/contexts/AuthContext.tsx (REQUIRED)
+- backend/auth.py (REQUIRED)
+
 When auth feature is detected, requirements.txt MUST include:
 fastapi
 uvicorn[standard]
