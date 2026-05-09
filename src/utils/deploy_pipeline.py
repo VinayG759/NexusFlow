@@ -214,7 +214,10 @@ class DeployPipeline:
                 "buildCommand": "npm run build",
                 "installCommand": "npm install --legacy-peer-deps",
                 "outputDirectory": "dist",
-                "framework": "vite"
+                "framework": "vite",
+                "rewrites": [
+                    {"source": "/(.*)", "destination": "/index.html"}
+                ]
             }
             vercel_json_path = "frontend/vercel.json"
             get_vj = await client.get(
