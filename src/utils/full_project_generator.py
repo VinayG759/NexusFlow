@@ -103,6 +103,9 @@ asyncpg
 python-dotenv
 pydantic
 httpx
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
 """,
 
     "backend/.env.example": """DATABASE_URL=postgresql+asyncpg://postgres:vinay2004@localhost:5432/{project_name}
@@ -657,6 +660,18 @@ Navigation bar MUST use Link components not <a> tags.
 Backend: main.py, database.py, models.py, routes.py, schemas.py, auth.py, requirements.txt, .env.example
 Frontend: src/App.tsx, src/index.tsx, src/index.css, src/pages/Login.tsx, src/pages/Register.tsx, src/pages/Dashboard.tsx, src/layouts/DashboardLayout.tsx, src/contexts/AuthContext.tsx, vite.config.ts, package.json, tsconfig.json, public/index.html
 
+When auth feature is detected, requirements.txt MUST include:
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]
+asyncpg
+python-dotenv
+pydantic
+httpx
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
+
 For simple apps ALWAYS generate:
 Backend: main.py, database.py, models.py, routes.py, schemas.py, requirements.txt, .env.example
 Frontend: src/App.tsx, src/index.tsx, src/index.css, vite.config.ts, package.json, tsconfig.json, public/index.html
@@ -752,6 +767,12 @@ class FullProjectGenerator:
         try:
             rag_context = rag_retriever.get_context_for_project(problem_statement)
             logger.info("[%s] RAG context retrieved (%d chars)", self.agent_name, len(rag_context))
+            # Cap to avoid Groq 413 "request too large" — ChromaDB returns more context
+            # as the knowledge base grows; keep only the most relevant portion.
+            _RAG_MAX_CHARS = 6000
+            if len(rag_context) > _RAG_MAX_CHARS:
+                rag_context = rag_context[:_RAG_MAX_CHARS]
+                logger.warning("[%s] RAG context capped at %d chars to prevent 413", self.agent_name, _RAG_MAX_CHARS)
         except Exception as rag_exc:
             logger.warning("[%s] RAG retrieval failed (non-critical): %s", self.agent_name, rag_exc)
             rag_context = ""
