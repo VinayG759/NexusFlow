@@ -668,6 +668,31 @@ async def download_project(project_id: int, db: AsyncSession = Depends(get_db)) 
     )
 
 
+@app.post("/projects/{project_id}/deploy")
+async def deploy_project(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    from src.utils.deploy_pipeline import deploy_pipeline
+
+    proj_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = proj_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    files_result = await db.execute(select(ProjectFile).where(ProjectFile.project_id == project_id))
+    files = files_result.scalars().all()
+    if not files:
+        raise HTTPException(status_code=404, detail="Project has no files")
+
+    files_list = [{"path": f.file_path, "content": f.content} for f in files]
+    result = await deploy_pipeline.deploy_project(project.name, files_list)
+    return result
+
+
+@app.get("/projects/{project_id}/deploy/status")
+async def deploy_status(project_id: int) -> dict:
+    from src.utils.deploy_pipeline import deploy_pipeline
+    return await deploy_pipeline.get_deploy_status(str(project_id))
+
+
 @app.delete("/projects/{project_id}")
 async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
     project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
