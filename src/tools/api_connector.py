@@ -356,7 +356,8 @@ class APIConnectorTool:
             for attempt in range(max_retries):
                 try:
                     response = await self._client.post(
-                        _GROQ_CHAT_URL, headers=headers, json=body
+                        _GROQ_CHAT_URL, headers=headers, json=body,
+                        timeout=120,
                     )
 
                     # 429 = TPM rate limit — wait for the 1-minute window to reset,
