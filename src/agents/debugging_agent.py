@@ -615,6 +615,7 @@ class DebuggingAgent:
         fm = self._fix_missing_css_imports(fm, issues, fixes)
         fm = self._fix_missing_packages(fm, issues, fixes)
         fm = self._fix_missing_app(fm, fixes)
+        fm = self._fix_empty_components(fm, fixes)
         fm = self._fix_process_env(fm, fixes)
         fm = self._fix_missing_default_exports(fm, fixes)
         fm = self._fix_missing_local_imports(fm, fixes)  # run last — depends on all other file-gen fixers
@@ -1051,6 +1052,32 @@ class DebuggingAgent:
                 "export default App;\n"
             )
             fixes.append("Created default App.tsx (index.tsx imports './App' but App.tsx was missing)")
+        return fm
+
+    def _fix_empty_components(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Fix components that render empty divs or null."""
+        empty_patterns = ("return <div />", "return (<div />)", "return null", "return <></>")
+        for path, content in list(fm.items()):
+            if not path.endswith(".tsx"):
+                continue
+            if any(p in content for p in empty_patterns) and len(content) < 300:
+                name = path.split("/")[-1].replace(".tsx", "")
+                fm[path] = (
+                    f"import React from 'react';\n\n"
+                    f"const {name}: React.FC = () => {{\n"
+                    f"  return (\n"
+                    f"    <div className=\"min-h-screen bg-gray-50 flex items-center justify-center\">\n"
+                    f"      <div className=\"bg-white rounded-2xl shadow-sm border border-gray-100 p-8 text-center max-w-md\">\n"
+                    f"        <h1 className=\"text-3xl font-bold text-gray-900 mb-2\">{name}</h1>\n"
+                    f"        <p className=\"text-gray-500\">Welcome to your application</p>\n"
+                    f"      </div>\n"
+                    f"    </div>\n"
+                    f"  );\n"
+                    f"}};\n\n"
+                    f"export default {name};\n"
+                )
+                fixes.append(f"Fixed empty component: {path}")
+                logger.info("%s fixed empty component: %s", self.agent_name, path)
         return fm
 
     def _fix_missing_packages(

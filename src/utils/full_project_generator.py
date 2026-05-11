@@ -712,6 +712,13 @@ The / route MUST always show content. NEVER leave / route empty or blank.
 If app has auth: / should redirect to /dashboard if logged in, else redirect to /login.
 If app has no auth: / is the main feature page (list, dashboard, home screen).
 A blank / route will cause a blank Vercel deployment — this is a critical error.
+
+NEVER generate empty components like:
+const Home = () => <div />;
+const Home = () => null;
+const Home = () => <></>;
+
+Every component MUST have meaningful content with TailwindCSS styling.
 """
 
 
