@@ -1055,13 +1055,15 @@ class DebuggingAgent:
         return fm
 
     def _fix_empty_components(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
-        """Fix components that render empty divs or null."""
+        """Fix components that render empty divs/null, or have JSX with no TailwindCSS classes."""
         empty_patterns = ("return <div />", "return (<div />)", "return null", "return <></>")
         for path, content in list(fm.items()):
             if not path.endswith(".tsx"):
                 continue
+            name = path.split("/")[-1].replace(".tsx", "")
+
+            # Case 1: truly empty component — replace entirely
             if any(p in content for p in empty_patterns) and len(content) < 300:
-                name = path.split("/")[-1].replace(".tsx", "")
                 fm[path] = (
                     f"import React from 'react';\n\n"
                     f"const {name}: React.FC = () => {{\n"
@@ -1078,6 +1080,23 @@ class DebuggingAgent:
                 )
                 fixes.append(f"Fixed empty component: {path}")
                 logger.info("%s fixed empty component: %s", self.agent_name, path)
+                continue
+
+            # Case 2: has JSX but zero className attributes — wrap in styled container
+            has_jsx = "<div>" in content or "<div " in content
+            if has_jsx and "className" not in content and len(content) < 500:
+                fm[path] = content.replace(
+                    "return (",
+                    'return (\n    <div className="min-h-screen bg-gray-50 p-8">\n      <div className="max-w-4xl mx-auto">',
+                    1,
+                ).replace(
+                    "  );",
+                    "      </div>\n    </div>\n  );",
+                    1,
+                )
+                fixes.append(f"Wrapped unstyled component in TailwindCSS container: {path}")
+                logger.info("%s wrapped unstyled component: %s", self.agent_name, path)
+
         return fm
 
     def _fix_missing_packages(

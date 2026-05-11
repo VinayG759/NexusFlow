@@ -665,6 +665,11 @@ NEVER use inline styles.
 NEVER use unstyled HTML.
 ALWAYS use TailwindCSS classes. TailwindCSS is installed via npm (tailwindcss + postcss + autoprefixer) — do NOT use the CDN.
 
+CRITICAL: Every JSX element MUST have className with TailwindCSS classes.
+NEVER generate plain HTML without className.
+WRONG:   <div><h1>Title</h1><p>Body</p></div>
+CORRECT: <div className="min-h-screen bg-gray-50"><h1 className="text-3xl font-bold text-gray-900">Title</h1><p className="text-gray-600">Body</p></div>
+
 51. App.tsx MUST import and use React Router for navigation:
 import { BrowserRouter, Routes, Route, Link, useNavigate } from 'react-router-dom';
 

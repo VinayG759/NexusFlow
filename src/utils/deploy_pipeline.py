@@ -6,6 +6,7 @@ Deploys generated projects to GitHub + Render + Vercel automatically.
 import httpx
 import base64
 import json
+import os
 import time
 from src.config.settings import settings
 from src.utils.logger import get_logger
@@ -95,7 +96,8 @@ class DeployPipeline:
             "github_repo": None,
             "render_url": None,
             "vercel_url": None,
-            "errors": []
+            "errors": [],
+            "setup_required": []
         }
 
         # Ensure Register.tsx is present before pushing (prevents Vercel build failures)
@@ -120,6 +122,8 @@ class DeployPipeline:
         )
         if render_result["status"] == "success":
             results["render_url"] = render_result["url"]
+            if render_result.get("setup_required"):
+                results["setup_required"].extend(render_result["setup_required"])
         else:
             results["errors"].append(f"Render: {render_result['error']}")
 
@@ -304,6 +308,21 @@ export default {
                 return {"status": "error", "error": "No Render owner account found"}
 
             service_name = f"{project_name}-backend-{int(time.time()) % 10000}"
+
+            db_url = os.getenv("DATABASE_URL", "")
+            setup_required = []
+            if not db_url or "localhost" in db_url or "127.0.0.1" in db_url:
+                db_url = ""
+                setup_required = [
+                    "Add DATABASE_URL to Render service environment variables",
+                    "Use a PostgreSQL service from Render, Railway, or Supabase"
+                ]
+                logger.warning("DATABASE_URL contains localhost — skipping for Render deployment")
+
+            env_vars = [{"key": "PYTHON_VERSION", "value": "3.11.9"}]
+            if db_url:
+                env_vars.append({"key": "DATABASE_URL", "value": db_url})
+
             response = await client.post(
                 "https://api.render.com/v1/services",
                 headers=headers,
@@ -311,20 +330,16 @@ export default {
                     "type": "web_service",
                     "name": service_name,
                     "ownerId": owner_id,
-                    "repo": repo_url,
-                    "branch": "main",
                     "serviceDetails": {
                         "env": "python",
                         "plan": "free",
+                        "region": "oregon",
+                        "branch": "main",
+                        "repo": repo_url,
+                        "buildCommand": "cd backend && pip install -r requirements.txt",
+                        "startCommand": "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT",
                         "pullRequestPreviewsEnabled": "no",
-                        "envSpecificDetails": {
-                            "buildCommand": "cd backend && pip install -r requirements.txt",
-                            "startCommand": "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT"
-                        },
-                        "envVars": [
-                            {"key": "PYTHON_VERSION", "value": "3.11.0"},
-                            {"key": "DATABASE_URL", "value": settings.DATABASE_URL}
-                        ]
+                        "envVars": env_vars
                     }
                 }
             )
@@ -334,7 +349,7 @@ export default {
                 service_url = data.get("service", {}).get("serviceDetails", {}).get("url", "")
                 if service_url and not service_url.startswith("http"):
                     service_url = f"https://{service_url}"
-                return {"status": "success", "url": service_url}
+                return {"status": "success", "url": service_url, "setup_required": setup_required}
             elif response.status_code == 400 and "already in use" in response.text:
                 list_response = await client.get(
                     "https://api.render.com/v1/services",
@@ -381,7 +396,7 @@ export default {
                     "buildCommand": "npm run build",
                     "installCommand": "npm install --legacy-peer-deps",
                     "outputDirectory": "dist",
-                    "protection": {"deploymentType": "none"},
+                    "ssoProtection": None,
                     "environmentVariables": [
                         {
                             "key": "VITE_API_URL",
@@ -404,7 +419,7 @@ export default {
                     await client.patch(
                         f"https://api.vercel.com/v9/projects/{project_slug}",
                         headers=headers,
-                        json={"protection": {"deploymentType": "none"}}
+                        json={"ssoProtection": None}
                     )
             elif create_resp.status_code in (200, 201):
                 project_id = create_resp.json().get("id", "")
