@@ -355,10 +355,12 @@ class APIConnectorTool:
             delay = retry_delay
             for attempt in range(max_retries):
                 try:
+                    logger.info("Calling Groq with model %s, timeout=%s", model_name, 120)
                     response = await self._client.post(
                         _GROQ_CHAT_URL, headers=headers, json=body,
                         timeout=120,
                     )
+                    logger.info("Groq response status: %s", response.status_code)
 
                     # 429 = TPM rate limit — wait for the 1-minute window to reset,
                     # then retry the SAME model (don't cascade: fallback models have
@@ -384,8 +386,8 @@ class APIConnectorTool:
                     if response.status_code in (400, 413):
                         last_error = response.text
                         logger.warning(
-                            "Groq %d on model=%r — cascading to next model",
-                            response.status_code, model_name,
+                            "Groq %d on model=%r — error body: %s — cascading to next model",
+                            response.status_code, model_name, last_error,
                         )
                         await asyncio.sleep(2)
                         break  # exit retry loop, move to next model

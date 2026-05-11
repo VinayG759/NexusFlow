@@ -814,7 +814,7 @@ class FullProjectGenerator:
         llm_result = await api_connector.call_groq(
             prompt=user_prompt,
             system_prompt=_SYSTEM_PROMPT,
-            max_tokens=8000,
+            max_tokens=6000,
         )
 
         _model_used = llm_result.get("model_used") or llm_result.get("model", "llama-3.3-70b-versatile")
