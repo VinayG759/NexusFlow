@@ -1024,11 +1024,17 @@ class DebuggingAgent:
         return fm
 
     def _fix_schema_imports(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
-        """Auto-generate stub Pydantic models for schema names imported but not defined."""
+        """Fix schema import mismatches in backend files.
+
+        Pass A: names imported from schemas that aren't defined → add stubs.
+        Pass B: schema names used in file body but not in its import → add to import line.
+        """
         schemas_content = fm.get("backend/schemas.py", "")
         if not schemas_content:
             return fm
         defined = set(re.findall(r"^class\s+(\w+)", schemas_content, re.MULTILINE))
+
+        # Pass A: missing stub classes
         missing: set[str] = set()
         for path, content in fm.items():
             if not (path.startswith("backend/") and path.endswith(".py") and path != "backend/schemas.py"):
@@ -1037,15 +1043,48 @@ class DebuggingAgent:
                 for name in [n.strip() for n in m.group(1).split(",") if n.strip()]:
                     if name and name not in defined:
                         missing.add(name)
-        if not missing:
-            return fm
-        stubs: list[str] = []
-        if "from pydantic import BaseModel" not in schemas_content and "from pydantic import" not in schemas_content:
-            stubs.append("from pydantic import BaseModel")
-        for name in sorted(missing):
-            stubs.append(f"\nclass {name}(BaseModel):\n    pass\n")
-        fm["backend/schemas.py"] = schemas_content.rstrip() + "\n\n" + "\n".join(stubs) + "\n"
-        fixes.append(f"Added missing schema stubs to backend/schemas.py: {sorted(missing)}")
+        if missing:
+            stubs: list[str] = []
+            if "from pydantic import BaseModel" not in schemas_content and "from pydantic import" not in schemas_content:
+                stubs.append("from pydantic import BaseModel")
+            for name in sorted(missing):
+                stubs.append(f"\nclass {name}(BaseModel):\n    pass\n")
+            fm["backend/schemas.py"] = schemas_content.rstrip() + "\n\n" + "\n".join(stubs) + "\n"
+            fixes.append(f"Added missing schema stubs to backend/schemas.py: {sorted(missing)}")
+            schemas_content = fm["backend/schemas.py"]
+            defined = set(re.findall(r"^class\s+(\w+)", schemas_content, re.MULTILINE))
+
+        # Pass B: schema names used in body but not imported → extend existing import line
+        for path, content in list(fm.items()):
+            if not (path.startswith("backend/") and path.endswith(".py") and path != "backend/schemas.py"):
+                continue
+            currently_imported: set[str] = set()
+            for m in re.finditer(r"from schemas import ([^\n]+)", content):
+                for name in [n.strip() for n in m.group(1).split(",") if n.strip()]:
+                    currently_imported.add(name)
+            needed: set[str] = set()
+            for name in defined:
+                if re.search(rf"\b{re.escape(name)}\b", content) and name not in currently_imported:
+                    needed.add(name)
+            if not needed:
+                continue
+            if currently_imported:
+                all_imports = sorted(currently_imported | needed)
+                content = re.sub(
+                    r"from schemas import [^\n]+",
+                    f"from schemas import {', '.join(all_imports)}",
+                    content,
+                )
+            else:
+                first_import = next(
+                    (i for i, ln in enumerate(content.splitlines()) if ln.startswith(("import ", "from "))),
+                    0,
+                )
+                lines = content.splitlines()
+                lines.insert(first_import + 1, f"from schemas import {', '.join(sorted(needed))}")
+                content = "\n".join(lines) + "\n"
+            fm[path] = content
+            fixes.append(f"Added missing schema imports to {path}: {sorted(needed)}")
         return fm
 
     def _fix_missing_css_imports(
