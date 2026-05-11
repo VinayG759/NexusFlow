@@ -598,6 +598,7 @@ class DebuggingAgent:
         errors: list[str] = []
 
         fm = _fmap(files)
+        fm = self._fix_hash_comments(fm, fixes)  # must run first — hash comments break JSON/TSX parsers
         fm = self._fix_base_not_defined(fm, fixes)
         fm = self._fix_ts_catch_types(fm, fixes)
         fm = self._fix_fastapi_imports(fm, fixes)
@@ -692,6 +693,24 @@ class DebuggingAgent:
         return files, fixes, errors
 
     # ── Structural fixers (no LLM needed) ────────────────────────────────────
+
+    _HASH_COMMENT_SAFE_EXTS = frozenset({
+        ".py", ".yml", ".yaml", ".env", ".md", ".sh", ".toml", ".ini", ".cfg", ".txt",
+    })
+
+    def _fix_hash_comments(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Strip leading # comment lines that LLMs sometimes prepend to JSON/TSX/HTML files."""
+        for path, content in list(fm.items()):
+            ext = ("." + path.rsplit(".", 1)[-1]) if "." in path.split("/")[-1] else ""
+            if ext in self._HASH_COMMENT_SAFE_EXTS:
+                continue
+            if content.startswith("# "):
+                stripped = re.sub(r"^(#[^\n]*\n)+", "", content)
+                if stripped != content:
+                    fm[path] = stripped
+                    fixes.append(f"Stripped leading # comment from {path}")
+                    logger.info("%s stripped hash comment from %s", self.agent_name, path)
+        return fm
 
     def _fix_cors(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
         main = fm.get("backend/main.py", "")
@@ -960,6 +979,21 @@ class DebuggingAgent:
                     content,
                 )
 
+            # Fix lowercase 'field' — not a valid pydantic v2 export
+            if re.search(r"from pydantic import[^\n]*\bfield\b", content):
+                if re.search(r"\bfield\s*\(", content):
+                    content = re.sub(r"\bfield\s*\(", "Field(", content)
+                    content = re.sub(
+                        r"(from pydantic import[^\n]*)\bfield\b",
+                        lambda m: m.group(0).replace("field", "Field"),
+                        content,
+                    )
+                else:
+                    content = re.sub(r",\s*\bfield\b", "", content)
+                    content = re.sub(r"\bfield\s*,\s*", "", content)
+                if content != original:
+                    fixes.append(f"Removed invalid pydantic 'field' import from {path}")
+
             if content != original:
                 fm[path] = content
                 fixes.append(f"Fixed Pydantic v2 compatibility in {path}")
@@ -1056,7 +1090,10 @@ class DebuggingAgent:
 
     def _fix_empty_components(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
         """Fix components that render empty divs/null, or have JSX with no TailwindCSS classes."""
-        empty_patterns = ("return <div />", "return (<div />)", "return null", "return <></>")
+        empty_patterns = (
+            "return <div />", "return (<div />)", "return null", "return <></>",
+            "=> <div />", "=> <div/>", "=> null;", "=> <></>;",
+        )
         for path, content in list(fm.items()):
             if not path.endswith(".tsx"):
                 continue

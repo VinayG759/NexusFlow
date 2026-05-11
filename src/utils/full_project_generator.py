@@ -724,6 +724,19 @@ const Home = () => null;
 const Home = () => <></>;
 
 Every component MUST have meaningful content with TailwindCSS styling.
+
+54. NEVER add # comments to JSON, TypeScript, TSX, HTML, or CSS files.
+JSON, HTML, TypeScript, and CSS do not support # comments.
+WRONG: # Complete package.json\n{{ "name": "app" }}
+WRONG: # Main App component\nimport React from 'react';
+CORRECT: Start JSON files with {{ or [ directly.
+CORRECT: Start TypeScript/TSX files with import or const directly.
+CORRECT: Start HTML files with <!DOCTYPE html> directly.
+
+Pydantic import rule: NEVER import lowercase 'field' from pydantic.
+It does not exist. Use 'Field' (capital F) if you need field defaults.
+WRONG: from pydantic import BaseModel, field, ConfigDict
+CORRECT: from pydantic import BaseModel, Field, ConfigDict
 """
 
 
