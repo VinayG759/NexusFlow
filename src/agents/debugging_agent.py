@@ -46,6 +46,7 @@ _FAKE_PACKAGES: frozenset[str] = frozenset({
     "@react-bits/animations",
     "react-bits",
     "@types/tailwindcss",  # not a real package; types are bundled inside tailwindcss itself
+    "@types/react-router-dom",  # deprecated for v6+; types are bundled in react-router-dom itself
 })
 
 # Packages that must always be present in requirements.txt (canonical pip names)
@@ -1415,11 +1416,23 @@ class DebuggingAgent:
                     if name and name[0].islower():
                         lines.append(f"export const {name} = () => ({{}} as any);")
                     else:
-                        lines.append(f"export const {name}: React.FC = () => <div />;")
+                        lines.append(
+                            f"export const {name}: React.FC = () => ("
+                            f'<div className="p-4 text-gray-700">{name}</div>);'
+                        )
                 if named_names:
                     lines.append("")
-                lines.append(f"const {comp_name}: React.FC = () => <div />;")
-                lines.append(f"export default {comp_name};")
+                lines.extend([
+                    f"const {comp_name}: React.FC = () => (",
+                    f'  <div className="min-h-screen bg-gray-50 flex items-center justify-center">',
+                    f'    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 text-center max-w-md">',
+                    f'      <h1 className="text-3xl font-bold text-gray-900 mb-2">{comp_name}</h1>',
+                    f'      <p className="text-gray-500">Welcome to your application</p>',
+                    f"    </div>",
+                    f"  </div>",
+                    f");",
+                    f"export default {comp_name};",
+                ])
 
                 fm[target] = "\n".join(lines) + "\n"
                 fixes.append(f"Created stub for missing local import: {target}")
@@ -1513,6 +1526,10 @@ export default function Register() {
             "UploadFile":      "from fastapi import UploadFile",
             "BackgroundTasks": "from fastapi import BackgroundTasks",
         }
+        _SECURITY_IMPORTS: dict[str, str] = {
+            "OAuth2PasswordBearer":     "from fastapi.security import OAuth2PasswordBearer",
+            "OAuth2PasswordRequestForm": "from fastapi.security import OAuth2PasswordRequestForm",
+        }
         _ORM_IMPORT = "from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, relationship"
         _SA_IMPORTS: dict[str, str] = {
             "AsyncSession":   "from sqlalchemy.ext.asyncio import AsyncSession",
@@ -1561,7 +1578,7 @@ export default function Register() {
                 content += "\n"
 
             to_add: list[str] = []
-            for symbol, import_line in {**_FASTAPI_IMPORTS, **_SA_IMPORTS}.items():
+            for symbol, import_line in {**_FASTAPI_IMPORTS, **_SA_IMPORTS, **_SECURITY_IMPORTS}.items():
                 module = import_line.split(" import ")[0].replace("from ", "")
                 already = (
                     import_line in content
