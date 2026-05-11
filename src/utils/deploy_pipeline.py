@@ -209,6 +209,47 @@ class DeployPipeline:
                     json=payload
                 )
 
+            # Push TailwindCSS config files if the project uses Tailwind
+            index_css = next(
+                (f.get("content", "") for f in files if f.get("path", "").endswith("frontend/src/index.css")),
+                "",
+            )
+            if "@tailwind" in index_css:
+                tailwind_config = """/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  theme: { extend: {} },
+  plugins: [],
+}
+"""
+                postcss_config = """export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+"""
+                for tw_path, tw_content in [
+                    ("frontend/tailwind.config.js", tailwind_config),
+                    ("frontend/postcss.config.js", postcss_config),
+                ]:
+                    get_tw = await client.get(
+                        f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{tw_path}",
+                        headers=headers
+                    )
+                    tw_payload = {
+                        "message": f"Add {tw_path}",
+                        "content": base64.b64encode(tw_content.encode()).decode()
+                    }
+                    if get_tw.status_code == 200:
+                        tw_payload["sha"] = get_tw.json().get("sha", "")
+                    await client.put(
+                        f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{tw_path}",
+                        headers=headers,
+                        json=tw_payload
+                    )
+                    logger.info("DeployPipeline: pushed %s to GitHub", tw_path)
+
             # Push vercel.json to frontend folder
             vercel_config = {
                 "buildCommand": "npm run build",
@@ -276,10 +317,9 @@ class DeployPipeline:
                         "env": "python",
                         "plan": "free",
                         "pullRequestPreviewsEnabled": "no",
-                        "rootDir": "backend",
                         "envSpecificDetails": {
-                            "buildCommand": "pip install -r requirements.txt",
-                            "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT"
+                            "buildCommand": "cd backend && pip install -r requirements.txt",
+                            "startCommand": "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT"
                         },
                         "envVars": [
                             {"key": "PYTHON_VERSION", "value": "3.11.0"},
@@ -341,6 +381,7 @@ class DeployPipeline:
                     "buildCommand": "npm run build",
                     "installCommand": "npm install --legacy-peer-deps",
                     "outputDirectory": "dist",
+                    "protection": {"deploymentType": "none"},
                     "environmentVariables": [
                         {
                             "key": "VITE_API_URL",
@@ -353,12 +394,18 @@ class DeployPipeline:
             )
 
             if create_resp.status_code == 409:
-                # Project already exists — fetch its ID
+                # Project already exists — fetch its ID and disable protection
                 get_resp = await client.get(
                     f"https://api.vercel.com/v9/projects/{project_slug}",
                     headers=headers
                 )
                 project_id = get_resp.json().get("id", "") if get_resp.status_code == 200 else ""
+                if project_id:
+                    await client.patch(
+                        f"https://api.vercel.com/v9/projects/{project_slug}",
+                        headers=headers,
+                        json={"protection": {"deploymentType": "none"}}
+                    )
             elif create_resp.status_code in (200, 201):
                 project_id = create_resp.json().get("id", "")
             else:
