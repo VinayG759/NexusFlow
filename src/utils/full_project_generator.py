@@ -824,7 +824,7 @@ class FullProjectGenerator:
             logger.info("[%s] RAG context retrieved (%d chars)", self.agent_name, len(rag_context))
             # Cap to avoid Groq 413 "request too large" — ChromaDB returns more context
             # as the knowledge base grows; keep only the most relevant portion.
-            _RAG_MAX_CHARS = 6000
+            _RAG_MAX_CHARS = 4000
             if len(rag_context) > _RAG_MAX_CHARS:
                 rag_context = rag_context[:_RAG_MAX_CHARS]
                 logger.warning("[%s] RAG context capped at %d chars to prevent 413", self.agent_name, _RAG_MAX_CHARS)
@@ -839,7 +839,7 @@ class FullProjectGenerator:
         llm_result = await api_connector.call_groq(
             prompt=user_prompt,
             system_prompt=_SYSTEM_PROMPT,
-            max_tokens=6000,
+            max_tokens=5700,
         )
 
         _model_used = llm_result.get("model_used") or llm_result.get("model", "llama-3.3-70b-versatile")
