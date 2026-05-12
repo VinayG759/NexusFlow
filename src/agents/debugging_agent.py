@@ -452,10 +452,26 @@ class DebuggingAgent:
             "Session":      "from sqlalchemy.orm import Session",
             "select":       "from sqlalchemy import select",
         }
+        _SECURITY_IMPORTS: dict[str, str] = {
+            "OAuth2PasswordBearer":      "from fastapi.security import OAuth2PasswordBearer",
+            "OAuth2PasswordRequestForm": "from fastapi.security import OAuth2PasswordRequestForm",
+        }
+        _TYPING_IMPORTS: dict[str, str] = {
+            "Optional":  "from typing import Optional",
+            "List":      "from typing import List",
+            "Dict":      "from typing import Dict",
+            "Union":     "from typing import Union",
+            "Any":       "from typing import Any",
+            "Tuple":     "from typing import Tuple",
+            "Set":       "from typing import Set",
+            "Type":      "from typing import Type",
+            "Callable":  "from typing import Callable",
+            "Generator": "from typing import Generator",
+        }
         for path, content in fm.items():
             if not (path.startswith("backend/") and path.endswith(".py")):
                 continue
-            for symbol, import_line in {**_FASTAPI_IMPORTS, **_SA_IMPORTS}.items():
+            for symbol, import_line in {**_FASTAPI_IMPORTS, **_SA_IMPORTS, **_SECURITY_IMPORTS, **_TYPING_IMPORTS}.items():
                 module = import_line.split(" import ")[0].replace("from ", "")
                 already = (
                     import_line in content
@@ -1569,6 +1585,18 @@ export default function Register() {
             "OAuth2PasswordBearer":     "from fastapi.security import OAuth2PasswordBearer",
             "OAuth2PasswordRequestForm": "from fastapi.security import OAuth2PasswordRequestForm",
         }
+        _TYPING_IMPORTS: dict[str, str] = {
+            "Optional":  "from typing import Optional",
+            "List":      "from typing import List",
+            "Dict":      "from typing import Dict",
+            "Union":     "from typing import Union",
+            "Any":       "from typing import Any",
+            "Tuple":     "from typing import Tuple",
+            "Set":       "from typing import Set",
+            "Type":      "from typing import Type",
+            "Callable":  "from typing import Callable",
+            "Generator": "from typing import Generator",
+        }
         _ORM_IMPORT = "from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, relationship"
         _SA_IMPORTS: dict[str, str] = {
             "AsyncSession":   "from sqlalchemy.ext.asyncio import AsyncSession",
@@ -1617,7 +1645,7 @@ export default function Register() {
                 content += "\n"
 
             to_add: list[str] = []
-            for symbol, import_line in {**_FASTAPI_IMPORTS, **_SA_IMPORTS, **_SECURITY_IMPORTS}.items():
+            for symbol, import_line in {**_FASTAPI_IMPORTS, **_SA_IMPORTS, **_SECURITY_IMPORTS, **_TYPING_IMPORTS}.items():
                 module = import_line.split(" import ")[0].replace("from ", "")
                 already = (
                     import_line in content
