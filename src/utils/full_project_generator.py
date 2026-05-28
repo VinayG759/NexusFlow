@@ -351,15 +351,21 @@ Rules you must follow without exception:
    - frontend/tsconfig.json
    - frontend/src/App.tsx
    - frontend/src/index.tsx
-   - frontend/src/styles/globals.css
-   - .env.example
+    - frontend/src/index.css
+    - frontend/src/components/ui.tsx
+    - frontend/index.html
+    - frontend/vite.config.ts
+    - frontend/tailwind.config.js
+    - frontend/postcss.config.js
+    - backend/.env.example
+    - frontend/.env
    - docker-compose.yml
    - README.md
 8. File content must be complete — no "# TODO", no "..." ellipsis, no placeholder logic.
 9. No markdown fences (no ```) anywhere inside file content strings.
 10. No hardcoded credentials — use environment variables loaded via python-dotenv or process.env.
 11. All TypeScript files must have proper type annotations — no implicit any.
-12. The frontend must call the backend API at the URL from an environment variable (REACT_APP_API_URL).
+12. The frontend must call the backend API at the URL from VITE_API_URL (Vite env var).
 13. Include proper CORS configuration in the FastAPI backend allowing the frontend origin.
 14. docker-compose.yml must wire backend, frontend, and PostgreSQL together.
 15. For PostgreSQL always use these exact credentials in .env and database.py:
@@ -737,6 +743,9 @@ Pydantic import rule: NEVER import lowercase 'field' from pydantic.
 It does not exist. Use 'Field' (capital F) if you need field defaults.
 WRONG: from pydantic import BaseModel, field, ConfigDict
 CORRECT: from pydantic import BaseModel, Field, ConfigDict
+
+55. Frontend completeness — The initial frontend MUST implement all key screens and flows described in the problem statement.
+    Use pages and layouts where appropriate, include loading/error/empty states, and avoid placeholder UIs.
 """
 
 

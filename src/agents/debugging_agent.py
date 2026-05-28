@@ -22,18 +22,12 @@ import time
 from pathlib import Path
 
 try:
-    import psycopg2
-    from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-except ImportError:
-    psycopg2 = None  # type: ignore[assignment]
-    ISOLATION_LEVEL_AUTOCOMMIT = None  # type: ignore[assignment]
-
-try:
     import psutil as _psutil
 except ImportError:
     _psutil = None  # type: ignore[assignment]
 
 from src.utils.logger import get_logger
+from src.rag.vector_store import vector_store
 from src.utils.training_collector import training_collector, _KNOWN_VERSIONS
 
 logger = get_logger(__name__)
@@ -2103,6 +2097,34 @@ export default function Register() {
             logger.warning("%s _diagnose_error failed: %s", self.agent_name, exc)
         return ""
 
+    def _build_rag_debug_context(self, errors: list[str]) -> str:
+        """Retrieve relevant code examples from the RAG store for debugging context."""
+        if not errors:
+            return ""
+
+        query = " | ".join(errors)[:800]
+        try:
+            examples = vector_store.retrieve(query=query, n_results=3)
+        except Exception as exc:
+            logger.warning("%s RAG retrieval failed: %s", self.agent_name, exc)
+            return ""
+
+        if not examples:
+            return ""
+
+        parts = [
+            "=== RELEVANT CODE EXAMPLES ===\n",
+            "Use these references only if they help fix the errors.\n\n",
+        ]
+        for example in examples:
+            code = example.get("code", "").strip()
+            if not code:
+                continue
+            parts.append(f"### {example.get('file_path', 'unknown')}\n")
+            parts.append(f"# {example.get('description', 'Example')}\n")
+            parts.append(f"```\n{code[:1200]}\n```\n\n")
+        return "".join(parts)
+
     async def _fix_with_claude(
         self,
         files: list[dict],
@@ -2113,6 +2135,7 @@ export default function Register() {
             return files, []
 
         error_text = "\n".join(errors)
+        rag_context = self._build_rag_debug_context(errors)
         relevant = [
             f for f in files
             if any(Path(f["path"]).name in err for err in errors)
@@ -2132,6 +2155,8 @@ export default function Register() {
             f"Context: {context}\n\nErrors:\n{error_text}\n\n"
             f"Files:\n{files_ctx}\n\nFix all errors. Return JSON array only."
         )
+        if rag_context:
+            user = f"{user}\n\n{rag_context}"
 
         try:
             async with httpx.AsyncClient(timeout=60) as client:

@@ -29,42 +29,59 @@ class UIDesignAgent:
 
         Returns enhanced files list with improved content.
         """
+        def _priority(path: str) -> int:
+            if path.endswith("App.tsx"):
+                return 0
+            if "/pages/" in path:
+                return 1
+            if "/layouts/" in path:
+                return 2
+            if "/components/" in path:
+                return 3
+            if path.endswith("index.css"):
+                return 4
+            if path.endswith("index.tsx"):
+                return 5
+            return 9
+
+        ordered_files = sorted(
+            existing_frontend_files,
+            key=lambda f: (_priority(f.get("path", "")), f.get("path", "")),
+        )
+        context_files = ordered_files[:12]
         files_context = "\n\n".join([
-            f"### {f['path']}\n{f['content'][:2000]}"
-            for f in existing_frontend_files[:8]
+            f"### {f['path']}\n{f['content'][:1600]}"
+            for f in context_files
         ])
+        file_index = "\n".join([f"- {f['path']}" for f in ordered_files])
 
-        system_prompt = """You are an elite UI/UX engineer and React developer with exceptional design taste.
+        system_prompt = """You are an expert UI/UX engineer and React developer.
 
-Your job is to take existing React frontend code and completely redesign it to be:
-- Visually stunning with modern design patterns
-- Dark theme with glassmorphism effects
-- Smooth animations using framer-motion
-- Proper color system with gradients and accents
-- Professional typography and spacing
-- Fully responsive for mobile, tablet and desktop
-- Production-ready code with no placeholders
+    Your job is to enhance the existing React frontend to be more polished and professional
+    WITHOUT changing functionality, routes, or data flows.
 
-Rules:
-1. Return ONLY a valid JSON array of file objects: [{"path": str, "content": str}]
-2. Include ALL frontend files — rewrite every single one
-3. Use TailwindCSS for styling
-4. Use framer-motion for animations
-5. Use lucide-react for icons
-6. Keep all the same functionality — only improve the UI
-7. Make it look like a $10M startup's product
-8. No markdown fences in file content
-9. Complete file content — no truncation, no placeholders"""
+    Rules:
+    1. Return ONLY a valid JSON array of file objects: [{"path": str, "content": str}]
+    2. Preserve the file structure and API contracts. Do NOT add/remove pages or routes.
+    3. Use TailwindCSS for styling. No inline styles.
+    4. Do NOT introduce new dependencies unless already present. If you must add one, update package.json.
+    5. Keep all existing functionality intact — only improve layout, spacing, typography, and visual hierarchy.
+    6. If a design reference is provided, align with it. Otherwise use a cohesive, modern light theme.
+    7. Make it fully responsive for mobile, tablet, and desktop.
+    8. Return ALL frontend files; if a file doesn't need changes, return it unchanged.
+    9. No markdown fences in file content. No placeholders or truncation."""
 
         user_prompt = f"""Project: {project_name}
 Description: {problem_statement}
 {f"Design Reference: {reference_context}" if reference_context else ""}
 
-Existing frontend files to redesign:
+Frontend file list (do not add/remove files):
+{file_index}
+
+Existing frontend files to enhance:
 {files_context}
 
-Redesign ALL frontend files with stunning UI. Keep same functionality, make it beautiful.
-Return ONLY the JSON array."""
+Enhance the UI while preserving structure and logic. Return ONLY the JSON array."""
 
         try:
             async with httpx.AsyncClient(timeout=120) as client:

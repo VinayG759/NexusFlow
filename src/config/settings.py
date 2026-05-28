@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     # Groq API key used by APIConnectorTool.call_groq() for fast LLM inference.
     # Obtain from https://console.groq.com — never commit the real value.
     GROQ_API_KEY: str = ""
+    # Groq vision model used for image analysis in /analyze-reference.
+    GROQ_VISION_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # ── Deployment ────────────────────────────────────────────────────────────
     GITHUB_TOKEN: str = ""

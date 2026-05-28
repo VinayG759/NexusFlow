@@ -71,6 +71,10 @@ class APIConnectorTool:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
         logger.info("APIConnectorTool initialised with timeout=%ds.", timeout)
 
+    async def call_llm(self, prompt: str, model: str = "claude-3-5-sonnet-20240620", max_tokens: int = 4096) -> dict:
+        """A wrapper to call an LLM, currently configured for Anthropic Claude."""
+        return await self.call_anthropic(prompt, model, max_tokens)
+
     async def get(
         self,
         url: str,
@@ -165,7 +169,7 @@ class APIConnectorTool:
             logger.exception("POST %s failed: %s", url, exc)
             return {"status": "error", "status_code": None, "url": url, "error": str(exc)}
 
-    async def call_llm(
+    async def call_anthropic(
         self,
         prompt: str,
         system_prompt: str | None = None,
@@ -256,62 +260,26 @@ class APIConnectorTool:
         self,
         prompt: str,
         system_prompt: str | None = None,
-        model: str | None = None,
+        model: str = _GROQ_DEFAULT_MODEL,
+        max_tokens: int = _GROQ_DEFAULT_MAX_TOKENS,
+        timeout: int = 120,
         max_retries: int = 3,
-        retry_delay: float = 5.0,
-        max_tokens: int | None = None,
+        initial_backoff: int = 65,
     ) -> dict:
-        """Call the Groq inference API with automatic model-cascade fallback.
-
-        Tries the requested model first. On a 429 rate-limit response, waits 2
-        seconds then moves to the next model in ``MODELS_IN_ORDER``. Non-429
-        errors are retried on the same model up to ``max_retries`` times with
-        exponential back-off before giving up.
-
-        Args:
-            prompt: The user message text to send to the model.
-            system_prompt: Optional system-level instruction added as the first
-                message in the conversation.
-            model: Groq model ID to use. Defaults to ``"llama-3.3-70b-versatile"``.
-            max_retries: Retries per model for non-429 transient errors.
-            retry_delay: Initial back-off delay (seconds) for transient retries.
-            max_tokens: Override the default token limit.
-
-        Returns:
-            On success::
-
-                {
-                    "status":     "success",
-                    "content":    str,   # assistant message text
-                    "model":      str,   # model ID echoed from the response
-                    "model_used": str,   # same as "model" (explicit alias)
-                    "usage":      dict,  # prompt/completion token counts
-                }
-
-            On failure (all models exhausted)::
-
-                {
-                    "status": "error",
-                    "error":  str,
-                }
-        """
+        """Serialise all Groq calls through a single semaphore, then delegate to _call_groq_inner."""
         if not settings.GROQ_API_KEY:
             return {"status": "error", "error": "GROQ_API_KEY is not set in settings."}
 
-        # Acquire the global semaphore to prevent concurrent builds from hammering the
-        # 12k TPM limit simultaneously.  Only one Groq call runs at a time; others queue
-        # here and proceed after the current holder releases (on success OR after its
-        # own 429-retry wait), naturally spacing requests across TPM windows.
         global _groq_semaphore
         if _groq_semaphore is None:
             _groq_semaphore = asyncio.Semaphore(1)
+
         async with _groq_semaphore:
             return await self._call_groq_inner(
                 prompt=prompt,
                 system_prompt=system_prompt,
                 model=model,
                 max_retries=max_retries,
-                retry_delay=retry_delay,
                 max_tokens=max_tokens,
             )
 

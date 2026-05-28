@@ -450,7 +450,6 @@ async def clarify(request: ClarifyRequest) -> dict:
 
 
 _GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
-_GROQ_VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 
 @app.post("/analyze-reference")
@@ -498,7 +497,11 @@ async def analyze_reference(request: ReferenceRequest) -> dict:
                             "Authorization": f"Bearer {settings.GROQ_API_KEY}",
                             "Content-Type": "application/json",
                         },
-                        json={"model": _GROQ_VISION_MODEL, "messages": vision_messages, "max_tokens": 1024},
+                        json={
+                            "model": settings.GROQ_VISION_MODEL,
+                            "messages": vision_messages,
+                            "max_tokens": 1024,
+                        },
                     )
                 if resp.status_code == 200:
                     raw_content = resp.json()["choices"][0]["message"]["content"]
