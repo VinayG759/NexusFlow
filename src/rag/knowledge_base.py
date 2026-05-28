@@ -197,36 +197,38 @@ input, textarea, select {
     "file_path": "frontend/tsconfig.json"
 },
 
-# ═══ PACKAGE.JSON TEMPLATE ═══
+# ═══ PACKAGE.JSON TEMPLATE (VITE) ═══
 {
     "id": "package_json_template",
     "category": "frontend",
     "subcategory": "config",
-    "description": "Complete package.json with all common dependencies",
-    "tags": ["package.json", "npm", "react", "dependencies"],
+    "description": "Vite-based package.json for React TypeScript app — NEVER use react-scripts",
+    "tags": ["package.json", "npm", "react", "vite", "dependencies"],
     "code": """{
   "name": "app-frontend",
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0",
-    "react-scripts": "5.0.1",
-    "typescript": "^4.9.5",
-    "react-router-dom": "^6.8.0",
-    "axios": "^1.3.0",
-    "@types/react": "^18.0.0",
-    "@types/react-dom": "^18.0.0",
-    "@types/node": "^18.0.0"
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.0",
+    "axios": "^1.7.7"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.6.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/node": "^22.0.0",
+    "tailwindcss": "^3.4.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test"
-  },
-  "browserslist": {
-    "production": [">0.2%", "not dead", "not op_mini all"],
-    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
   }
 }""",
     "file_path": "frontend/package.json"
@@ -1201,6 +1203,501 @@ async def upload_file(file: UploadFile = File(...)):
     return {"filename": filename, "url": f"/uploads/{filename}", "size": len(contents)}
 """,
     "file_path": "backend/uploads.py"
+},
+
+# ═══ VITE CONFIG TEMPLATE ═══
+{
+    "id": "vite_config_template",
+    "category": "frontend",
+    "subcategory": "config",
+    "description": "vite.config.ts for React TypeScript project with API proxy",
+    "tags": ["vite", "config", "typescript", "react", "proxy"],
+    "code": """import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },
+})
+""",
+    "file_path": "frontend/vite.config.ts"
+},
+
+# ═══ REACT ROUTER V6 APP WITH PROTECTED ROUTES ═══
+{
+    "id": "react_router_protected_routes",
+    "category": "frontend",
+    "subcategory": "routing",
+    "description": "React Router v6 App.tsx with public and protected routes, AuthProvider wrapping",
+    "tags": ["react-router", "routing", "protected", "auth", "typescript"],
+    "code": """
+import React from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Dashboard from './pages/Dashboard';
+import DashboardLayout from './layouts/DashboardLayout';
+
+function PrivateRoute({ children }: { children: React.ReactNode }) {
+  const { user, isLoading } = useAuth();
+  if (isLoading) return <div className="flex items-center justify-center h-screen"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" /></div>;
+  return user ? <>{children}</> : <Navigate to="/login" replace />;
+}
+
+function PublicRoute({ children }: { children: React.ReactNode }) {
+  const { user, isLoading } = useAuth();
+  if (isLoading) return null;
+  return !user ? <>{children}</> : <Navigate to="/dashboard" replace />;
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/login" element={<PublicRoute><Login /></PublicRoute>} />
+          <Route path="/register" element={<PublicRoute><Register /></PublicRoute>} />
+          <Route path="/dashboard" element={
+            <PrivateRoute>
+              <DashboardLayout><Dashboard /></DashboardLayout>
+            </PrivateRoute>
+          } />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
+  );
+}
+""",
+    "file_path": "frontend/src/App.tsx"
+},
+
+# ═══ AXIOS API SERVICE WITH INTERCEPTORS ═══
+{
+    "id": "axios_api_service",
+    "category": "frontend",
+    "subcategory": "api",
+    "description": "Axios instance with auth token interceptor and 401 redirect",
+    "tags": ["axios", "api", "interceptor", "auth", "typescript"],
+    "code": """
+import axios from 'axios';
+
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+  timeout: 30000,
+});
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('token');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
+
+export default api;
+""",
+    "file_path": "frontend/src/services/api.ts"
+},
+
+# ═══ REACT ERROR BOUNDARY ═══
+{
+    "id": "react_error_boundary",
+    "category": "frontend",
+    "subcategory": "components",
+    "description": "React class-based error boundary with fallback UI",
+    "tags": ["error-boundary", "react", "typescript", "error-handling"],
+    "code": """
+import React, { Component, ReactNode } from 'react';
+
+interface Props { children: ReactNode; fallback?: ReactNode; }
+interface State { hasError: boolean; error: Error | null; }
+
+export default class ErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback ?? (
+        <div className="flex flex-col items-center justify-center min-h-[200px] p-8 text-center">
+          <div className="text-4xl mb-4">&#9888;</div>
+          <h2 className="text-xl font-semibold text-gray-800 mb-2">Something went wrong</h2>
+          <p className="text-gray-500 text-sm mb-4">{this.state.error?.message}</p>
+          <button onClick={() => this.setState({ hasError: false, error: null })}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+""",
+    "file_path": "frontend/src/components/ErrorBoundary.tsx"
+},
+
+# ═══ LOADING SKELETON COMPONENT ═══
+{
+    "id": "loading_skeleton",
+    "category": "frontend",
+    "subcategory": "components",
+    "description": "Skeleton loading placeholder with pulse animation using TailwindCSS",
+    "tags": ["skeleton", "loading", "react", "tailwind", "ux"],
+    "code": """
+import React from 'react';
+
+function Skeleton({ className = '' }: { className?: string }) {
+  return <div className={`animate-pulse bg-gray-200 rounded ${className}`} />;
+}
+
+export function CardSkeleton() {
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6 space-y-4">
+      <Skeleton className="h-4 w-1/3" />
+      <Skeleton className="h-8 w-1/2" />
+      <Skeleton className="h-4 w-full" />
+      <Skeleton className="h-4 w-2/3" />
+    </div>
+  );
+}
+
+export function TableRowSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <>
+      {Array.from({ length: rows }).map((_, i) => (
+        <tr key={i} className="border-b border-gray-100">
+          {Array.from({ length: 4 }).map((_, j) => (
+            <td key={j} className="px-6 py-4"><Skeleton className="h-4 w-full" /></td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+export default Skeleton;
+""",
+    "file_path": "frontend/src/components/Skeleton.tsx"
+},
+
+# ═══ MODAL COMPONENT ═══
+{
+    "id": "modal_component",
+    "category": "frontend",
+    "subcategory": "components",
+    "description": "Accessible modal dialog with backdrop click to close and escape key support",
+    "tags": ["modal", "dialog", "react", "tailwind", "accessibility"],
+    "code": """
+import React, { useEffect, ReactNode } from 'react';
+
+interface ModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+  size?: 'sm' | 'md' | 'lg';
+}
+
+const sizeClasses = { sm: 'max-w-sm', md: 'max-w-md', lg: 'max-w-2xl' };
+
+export default function Modal({ isOpen, onClose, title, children, size = 'md' }: ModalProps) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    if (isOpen) document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className={`relative bg-white rounded-2xl shadow-2xl w-full ${sizeClasses[size]} max-h-[90vh] overflow-y-auto`}>
+        <div className="flex items-center justify-between p-6 border-b border-gray-200">
+          <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div className="p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+""",
+    "file_path": "frontend/src/components/Modal.tsx"
+},
+
+# ═══ TOAST NOTIFICATION HOOK ═══
+{
+    "id": "toast_hook",
+    "category": "frontend",
+    "subcategory": "hooks",
+    "description": "Lightweight toast notification system using React state — no external library needed",
+    "tags": ["toast", "notification", "react", "hook", "tailwind"],
+    "code": """
+import React, { useState, useCallback, createContext, useContext, ReactNode } from 'react';
+
+type ToastType = 'success' | 'error' | 'info';
+interface Toast { id: number; message: string; type: ToastType; }
+interface ToastContextType { showToast: (message: string, type?: ToastType) => void; }
+
+const ToastContext = createContext<ToastContextType | null>(null);
+let _counter = 0;
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const showToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = ++_counter;
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3500);
+  }, []);
+
+  const colors = { success: 'bg-green-500', error: 'bg-red-500', info: 'bg-blue-500' };
+  const icons = { success: '&#10003;', error: '&#10005;', info: 'i' };
+
+  return (
+    <ToastContext.Provider value={{ showToast }}>
+      {children}
+      <div className="fixed bottom-4 right-4 z-50 space-y-2">
+        {toasts.map(t => (
+          <div key={t.id} className={`${colors[t.type]} text-white px-4 py-3 rounded-lg shadow-lg text-sm flex items-center gap-2`}>
+            <span dangerouslySetInnerHTML={{ __html: icons[t.type] }} />
+            {t.message}
+          </div>
+        ))}
+      </div>
+    </ToastContext.Provider>
+  );
+}
+
+export function useToast() {
+  const ctx = useContext(ToastContext);
+  if (!ctx) throw new Error('useToast must be used within ToastProvider');
+  return ctx;
+}
+""",
+    "file_path": "frontend/src/hooks/useToast.tsx"
+},
+
+# ═══ DOCKER-COMPOSE FOR GENERATED PROJECTS ═══
+{
+    "id": "docker_compose_generated",
+    "category": "devops",
+    "subcategory": "docker",
+    "description": "docker-compose.yml for a generated full-stack app (backend + frontend + PostgreSQL)",
+    "tags": ["docker", "docker-compose", "postgresql", "devops", "deployment"],
+    "code": """version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-password}@db:5432/appdb
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+""",
+    "file_path": "docker-compose.yml"
+},
+
+# ═══ DOCKERFILE FOR GENERATED BACKEND ═══
+{
+    "id": "dockerfile_backend_generated",
+    "category": "devops",
+    "subcategory": "docker",
+    "description": "Dockerfile for a FastAPI backend with asyncpg",
+    "tags": ["docker", "dockerfile", "fastapi", "python", "backend"],
+    "code": """FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+""",
+    "file_path": "backend/Dockerfile"
+},
+
+# ═══ DOCKERFILE FOR GENERATED FRONTEND (VITE) ═══
+{
+    "id": "dockerfile_frontend_generated",
+    "category": "devops",
+    "subcategory": "docker",
+    "description": "Multi-stage Dockerfile for a Vite React app — builds with Node, serves with Nginx",
+    "tags": ["docker", "dockerfile", "vite", "react", "nginx", "frontend"],
+    "code": """FROM node:18-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+""",
+    "file_path": "frontend/Dockerfile"
+},
+
+# ═══ NGINX CONFIG FOR GENERATED FRONTEND ═══
+{
+    "id": "nginx_conf_generated",
+    "category": "devops",
+    "subcategory": "nginx",
+    "description": "nginx.conf for Vite React SPA — handles React Router client-side routing",
+    "tags": ["nginx", "spa", "react", "routing", "frontend"],
+    "code": """server {
+    listen 80;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}
+""",
+    "file_path": "frontend/nginx.conf"
+},
+
+# ═══ ZUSTAND GLOBAL STATE STORE ═══
+{
+    "id": "zustand_store",
+    "category": "frontend",
+    "subcategory": "state",
+    "description": "Zustand store for global client state — lighter than Redux, no boilerplate",
+    "tags": ["zustand", "state", "react", "typescript", "store"],
+    "code": """
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+
+interface User { id: number; email: string; name: string; }
+
+interface AppStore {
+  user: User | null;
+  token: string | null;
+  sidebarOpen: boolean;
+  setUser: (user: User | null) => void;
+  setToken: (token: string | null) => void;
+  toggleSidebar: () => void;
+  logout: () => void;
+}
+
+export const useStore = create<AppStore>()(
+  persist(
+    (set) => ({
+      user: null,
+      token: null,
+      sidebarOpen: true,
+      setUser: (user) => set({ user }),
+      setToken: (token) => set({ token }),
+      toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+      logout: () => set({ user: null, token: null }),
+    }),
+    { name: 'app-store', partialize: (s) => ({ token: s.token }) }
+  )
+);
+""",
+    "file_path": "frontend/src/store/useStore.ts"
+},
+
+# ═══ FASTAPI BACKGROUND TASKS PATTERN ═══
+{
+    "id": "fastapi_background_tasks",
+    "category": "backend",
+    "subcategory": "tasks",
+    "description": "FastAPI async background job with status polling — avoids request timeouts for long operations",
+    "tags": ["fastapi", "background-tasks", "async", "job", "polling"],
+    "code": """
+import uuid
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from typing import Dict, Any
+
+router = APIRouter()
+_jobs: Dict[str, Dict[str, Any]] = {}
+
+async def _process(job_id: str, payload: dict) -> None:
+    try:
+        _jobs[job_id]["status"] = "running"
+        result = {"processed": True, "data": payload}
+        _jobs[job_id] = {"status": "complete", "result": result, "error": None}
+    except Exception as e:
+        _jobs[job_id] = {"status": "failed", "result": None, "error": str(e)}
+
+@router.post("/jobs")
+async def create_job(payload: dict, background_tasks: BackgroundTasks):
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "queued", "result": None, "error": None}
+    background_tasks.add_task(_process, job_id, payload)
+    return {"job_id": job_id, "status": "queued"}
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    if job_id not in _jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, **_jobs[job_id]}
+""",
+    "file_path": "backend/jobs.py"
 },
 
 ]
