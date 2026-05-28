@@ -256,5 +256,33 @@ Rules:
             return {"status": "success", "model": model_id}
         return {"status": "error", "message": "settings.py not found"}
 
+    # ─── AUTO LOOP ───────────────────────────────────────────────────────
+    async def auto_loop(self, db: AsyncSession) -> dict:
+        """Export → validate → submit in one call.
+
+        Returns immediately with a "not_ready" status if there aren't enough
+        high-quality examples yet, or with the Groq submission result if the
+        data meets the minimum threshold.
+        """
+        logger.info("FineTuningPipeline: running auto-loop")
+        file_path = await self.export_training_data(db)
+        validation = self.validate_jsonl(file_path)
+
+        result: dict = {
+            "exported_file": str(file_path),
+            "validation": validation,
+        }
+
+        if not validation["ready_for_training"]:
+            result["status"] = "not_ready"
+            result["message"] = validation["recommendation"]
+            logger.info("FineTuningPipeline auto-loop: not ready — %s", validation["recommendation"])
+            return result
+
+        submission = await self.submit_to_groq(file_path)
+        result.update(submission)
+        logger.info("FineTuningPipeline auto-loop: submitted — status=%s", submission.get("status"))
+        return result
+
 
 finetune_pipeline = FineTuningPipeline()

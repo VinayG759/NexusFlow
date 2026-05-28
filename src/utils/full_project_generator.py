@@ -773,7 +773,13 @@ class FullProjectGenerator:
 
     # ── Public methods ────────────────────────────────────────────────────────
 
-    async def generate(self, problem_statement: str, options: dict | None = None, db: AsyncSession | None = None) -> dict:
+    async def generate(
+        self,
+        problem_statement: str,
+        options: dict | None = None,
+        db: AsyncSession | None = None,
+        clarifying_answers: dict[str, str] | None = None,
+    ) -> dict:
         """Generate a complete project from a problem statement in one LLM call.
 
         Builds a user prompt from *problem_statement* and any enabled feature
@@ -841,7 +847,7 @@ class FullProjectGenerator:
             logger.warning("[%s] RAG retrieval failed (non-critical): %s", self.agent_name, rag_exc)
             rag_context = ""
 
-        user_prompt = self._build_user_prompt(problem_statement, opts, rag_context)
+        user_prompt = self._build_user_prompt(problem_statement, opts, rag_context, clarifying_answers or {})
 
         # ── Single LLM call ───────────────────────────────────────────────────
         logger.info("[%s] Sending single LLM call for complete project.", self.agent_name)
@@ -1260,13 +1266,21 @@ class FullProjectGenerator:
 
         return {"type": project_type, "features": features}
 
-    def _build_user_prompt(self, problem_statement: str, options: dict, rag_context: str = "") -> str:
+    def _build_user_prompt(
+        self,
+        problem_statement: str,
+        options: dict,
+        rag_context: str = "",
+        clarifying_answers: dict[str, str] | None = None,
+    ) -> str:
         """Compose the user-facing prompt from the problem statement and options.
 
         Args:
             problem_statement: Core project description.
             options: Feature flags — ``threejs``, ``gsap``, ``reactbits``.
             rag_context: Pre-built RAG context string with verified templates.
+            clarifying_answers: Answers from the /clarify endpoint keyed by
+                question id (e.g. {"auth_type": "JWT tokens", "db": "PostgreSQL"}).
 
         Returns:
             Formatted prompt string ready to send to the LLM.
@@ -1278,6 +1292,13 @@ class FullProjectGenerator:
             lines.append("\n=== YOUR TASK ===\n")
 
         lines.append(f"Project requirement: {problem_statement}")
+
+        if clarifying_answers:
+            lines.append("\n=== USER REQUIREMENTS (from clarifying questions) ===")
+            for q_id, answer in clarifying_answers.items():
+                lines.append(f"  - {q_id}: {answer}")
+            lines.append("")
+
         extras: list[str] = []
         if options.get("threejs"):
             extras.append("Use Three.js for 3D visuals in the frontend.")

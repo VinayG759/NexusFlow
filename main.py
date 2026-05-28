@@ -4,19 +4,22 @@ import io
 import json
 import asyncio
 import httpx
+import shutil
+import tempfile
 import uuid
 import zipfile
 
 import os
+from pathlib import Path
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict
 
 import uvicorn
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func as sql_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +47,7 @@ from src.utils.training_data import TRAINING_DATA
 logger = get_logger(__name__)
 
 _build_jobs: Dict[str, Any] = {}
+_preview_jobs: Dict[str, Any] = {}
 
 # ── Request / response models ─────────────────────────────────────────────────
 
@@ -58,6 +62,12 @@ class BuildRequest(BaseModel):
     api_keys: dict[str, str] = {}
     additional_context: str = ""
     reference_context: str = ""
+    clarifying_answers: dict[str, str] = {}
+
+
+class FeedbackRequest(BaseModel):
+    file_path: str
+    feedback: str
 
 
 class ReferenceRequest(BaseModel):
@@ -229,7 +239,10 @@ async def run_build_job(job_id: str, request: BuildRequest) -> None:
         db = AsyncSessionFactory()
         try:
             _build_jobs[job_id]["progress"] = "Running debugging agent..."
-            result = await full_project_generator.generate(problem, options, db)
+            result = await full_project_generator.generate(
+                problem, options, db,
+                clarifying_answers=request.clarifying_answers or None,
+            )
             _build_jobs[job_id]["progress"] = "Saving to database..."
             await db.commit()
         except Exception:
@@ -287,6 +300,70 @@ async def build_status(job_id: str) -> dict:
         "progress": job["progress"],
         "result": job["result"] if job["status"] == "complete" else None,
         "error": job["error"],
+    }
+
+
+@app.post("/build/{job_id}/feedback")
+async def build_feedback(
+    job_id: str,
+    request: FeedbackRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Regenerate a single file from a completed build based on user feedback."""
+    if job_id not in _build_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _build_jobs[job_id]
+    if job["status"] != "complete":
+        raise HTTPException(status_code=400, detail="Build must be complete before providing feedback")
+
+    project_id = (job.get("result") or {}).get("project_id")
+    if not project_id:
+        raise HTTPException(status_code=400, detail="No project_id in job result")
+
+    file_result = await db.execute(
+        select(ProjectFile).where(
+            ProjectFile.project_id == project_id,
+            ProjectFile.file_path == request.file_path,
+        )
+    )
+    file_record = file_result.scalar_one_or_none()
+    if not file_record:
+        raise HTTPException(status_code=404, detail=f"File {request.file_path!r} not found in project")
+
+    system_prompt = (
+        "You are a senior full-stack developer making targeted edits to a specific file. "
+        "Return ONLY the complete updated file content — no markdown fences, no explanation. "
+        "The file must be complete and correct — not a diff, not partial code."
+    )
+    user_prompt = (
+        f"File path: {request.file_path}\n\n"
+        f"Current content:\n{file_record.content}\n\n"
+        f"User feedback: {request.feedback}\n\n"
+        "Return the complete updated file content only."
+    )
+
+    llm_result = await api_connector.call_groq(prompt=user_prompt, system_prompt=system_prompt)
+    if llm_result["status"] != "success":
+        raise HTTPException(status_code=500, detail=f"LLM call failed: {llm_result.get('error')}")
+
+    new_content = llm_result["content"].strip()
+    for fence in ("```typescript", "```tsx", "```python", "```json", "```"):
+        if new_content.startswith(fence):
+            new_content = new_content[len(fence):]
+            break
+    if new_content.endswith("```"):
+        new_content = new_content[:-3]
+    new_content = new_content.strip()
+
+    file_record.content = new_content
+    await db.commit()
+
+    logger.info("POST /build/%s/feedback — updated %r in project %d", job_id, request.file_path, project_id)
+    return {
+        "status": "success",
+        "file_path": request.file_path,
+        "message": "File updated based on your feedback",
+        "chars": len(new_content),
     }
 
 
@@ -708,6 +785,187 @@ async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)) ->
     return {"status": "success", "message": f"Project '{name}' deleted"}
 
 
+# ── Preview endpoints ─────────────────────────────────────────────────────────
+
+
+async def run_preview_job(preview_id: str, project_id: int) -> None:
+    """Write project files to disk, npm build, then serve via /previews/{name}."""
+    try:
+        _preview_jobs[preview_id]["progress"] = "Loading project files from database..."
+
+        db = AsyncSessionFactory()
+        try:
+            stmt = select(Project).options(selectinload(Project.files)).where(Project.id == project_id)
+            project = (await db.execute(stmt)).scalar_one_or_none()
+            if not project:
+                _preview_jobs[preview_id]["status"] = "failed"
+                _preview_jobs[preview_id]["error"] = "Project not found"
+                return
+            project_name = project.name
+            files = list(project.files)
+        finally:
+            await db.close()
+
+        work_dir = Path(tempfile.gettempdir()) / "nexusflow_preview_builds" / project_name
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        _preview_jobs[preview_id]["progress"] = "Writing project files to disk..."
+        for f in files:
+            dest = work_dir / f.file_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(f.content, encoding="utf-8")
+
+        frontend_dir = work_dir / "frontend"
+        if not frontend_dir.exists():
+            _preview_jobs[preview_id]["status"] = "failed"
+            _preview_jobs[preview_id]["error"] = "No frontend/ directory in project"
+            return
+
+        _preview_jobs[preview_id]["progress"] = "Running npm install..."
+        install = await asyncio.create_subprocess_exec(
+            "npm", "install", "--legacy-peer-deps",
+            cwd=str(frontend_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, install_err = await asyncio.wait_for(install.communicate(), timeout=180)
+        if install.returncode != 0:
+            _preview_jobs[preview_id]["status"] = "failed"
+            _preview_jobs[preview_id]["error"] = f"npm install failed:\n{install_err.decode()[:600]}"
+            return
+
+        _preview_jobs[preview_id]["progress"] = "Running npm run build..."
+        build = await asyncio.create_subprocess_exec(
+            "npm", "run", "build",
+            cwd=str(frontend_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, build_err = await asyncio.wait_for(build.communicate(), timeout=300)
+        if build.returncode != 0:
+            _preview_jobs[preview_id]["status"] = "failed"
+            _preview_jobs[preview_id]["error"] = f"npm build failed:\n{build_err.decode()[:600]}"
+            return
+
+        dist_dir = frontend_dir / "dist"
+        if not dist_dir.exists():
+            _preview_jobs[preview_id]["status"] = "failed"
+            _preview_jobs[preview_id]["error"] = "Build succeeded but dist/ not found"
+            return
+
+        stable = Path(settings.OUTPUT_DIRECTORY) / "previews" / project_name
+        stable.parent.mkdir(parents=True, exist_ok=True)
+        if stable.exists():
+            shutil.rmtree(stable)
+        shutil.copytree(dist_dir, stable)
+
+        _preview_jobs[preview_id]["status"] = "ready"
+        _preview_jobs[preview_id]["progress"] = "Preview ready"
+        _preview_jobs[preview_id]["preview_url"] = f"/previews/{project_name}/"
+        _preview_jobs[preview_id]["project_name"] = project_name
+        logger.info("Preview job %s ready — project=%r url=/previews/%s/", preview_id, project_name, project_name)
+
+    except asyncio.TimeoutError:
+        _preview_jobs[preview_id]["status"] = "failed"
+        _preview_jobs[preview_id]["error"] = "Preview build timed out (>5 min)"
+    except Exception as exc:
+        _preview_jobs[preview_id]["status"] = "failed"
+        _preview_jobs[preview_id]["error"] = str(exc)
+        logger.exception("Preview job %s failed: %s", preview_id, exc)
+
+
+@app.post("/projects/{project_id}/preview/start")
+async def start_preview(project_id: int, background_tasks: BackgroundTasks) -> dict:
+    """Kick off a background npm build + preview serve for a project."""
+    preview_id = str(uuid.uuid4())
+    _preview_jobs[preview_id] = {
+        "status": "building",
+        "progress": "Starting preview build...",
+        "preview_url": None,
+        "error": None,
+        "project_id": project_id,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    background_tasks.add_task(run_preview_job, preview_id, project_id)
+    logger.info("POST /projects/%d/preview/start — preview_id=%s", project_id, preview_id)
+    return {"preview_id": preview_id, "status": "building", "message": "Preview build started"}
+
+
+@app.get("/projects/{project_id}/preview/status/{preview_id}")
+async def preview_status(project_id: int, preview_id: str) -> dict:
+    """Poll the status of a preview build job."""
+    if preview_id not in _preview_jobs:
+        raise HTTPException(status_code=404, detail="Preview job not found")
+    job = _preview_jobs[preview_id]
+    return {
+        "preview_id": preview_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "preview_url": job.get("preview_url"),
+        "error": job.get("error"),
+    }
+
+
+@app.get("/previews/{project_name}/{path:path}")
+async def serve_preview(project_name: str, path: str) -> FileResponse:
+    """SPA-aware static file server for built preview frontends."""
+    base = (Path(settings.OUTPUT_DIRECTORY) / "previews" / project_name).resolve()
+    if not base.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No preview for {project_name!r} — call /projects/{{id}}/preview/start first",
+        )
+
+    target = (base / (path or "index.html")).resolve()
+    if not str(target).startswith(str(base)):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not target.exists() or target.is_dir():
+        target = (base / "index.html").resolve()
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Preview file not found")
+
+    return FileResponse(str(target))
+
+
+@app.post("/projects/{project_id}/deploy/k8s")
+async def deploy_k8s(
+    project_id: int,
+    backend_image: str = Query(default=""),
+    frontend_image: str = Query(default=""),
+    domain: str = Query(default=""),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Generate and download Kubernetes manifests for a project as a zip."""
+    from src.utils.deploy_pipeline import deploy_pipeline
+
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    manifests = deploy_pipeline.generate_k8s_manifests(
+        project_name=project.name,
+        backend_image=backend_image,
+        frontend_image=frontend_image,
+        domain=domain,
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for manifest_path, content in manifests.items():
+            zf.writestr(manifest_path, content)
+    buf.seek(0)
+
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in project.name)
+    logger.info("POST /projects/%d/deploy/k8s — generated %d manifests", project_id, len(manifests))
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}-k8s.zip"'},
+    )
+
+
 # ── Training data endpoints ───────────────────────────────────────────────────
 
 
@@ -793,6 +1051,18 @@ async def finetune_status(job_id: str):
 async def activate_model(model_id: str):
     from src.utils.finetune_pipeline import finetune_pipeline
     return finetune_pipeline.activate_fine_tuned_model(model_id)
+
+
+@app.post("/training/auto-loop")
+async def training_auto_loop(db: AsyncSession = Depends(get_db)) -> dict:
+    """Export training data, validate, and submit to Groq fine-tuning if ready.
+
+    Returns immediately with ``status: not_ready`` and the recommendation
+    message if the dataset is below the 200-example threshold, or with the
+    Groq submission result if training can proceed.
+    """
+    from src.utils.finetune_pipeline import finetune_pipeline
+    return await finetune_pipeline.auto_loop(db)
 
 
 # ── Setup script helpers ──────────────────────────────────────────────────────

@@ -467,5 +467,210 @@ export default {
                 return response.json()
             return {"status": "error"}
 
+    def generate_k8s_manifests(
+        self,
+        project_name: str,
+        backend_image: str = "",
+        frontend_image: str = "",
+        namespace: str = "default",
+        backend_port: int = 8001,
+        frontend_port: int = 80,
+        domain: str = "",
+    ) -> dict[str, str]:
+        """Generate Kubernetes manifests for a generated full-stack project.
+
+        Returns a dict mapping file path → YAML content for:
+        - k8s/backend-deployment.yaml
+        - k8s/backend-service.yaml
+        - k8s/frontend-deployment.yaml
+        - k8s/frontend-service.yaml
+        - k8s/ingress.yaml
+        - k8s/secrets.yaml   (template only — fill in real values before applying)
+        - k8s/kustomization.yaml
+        """
+        slug = project_name.lower().replace("_", "-")
+        be_image = backend_image or f"{slug}-backend:latest"
+        fe_image = frontend_image or f"{slug}-frontend:latest"
+        host = domain or f"{slug}.example.com"
+        db_name = slug.replace("-", "_")
+
+        backend_deployment = f"""\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {slug}-backend
+  namespace: {namespace}
+  labels:
+    app: {slug}-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {slug}-backend
+  template:
+    metadata:
+      labels:
+        app: {slug}-backend
+    spec:
+      containers:
+        - name: backend
+          image: {be_image}
+          ports:
+            - containerPort: {backend_port}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {slug}-secrets
+                  key: database-url
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {backend_port}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+"""
+
+        backend_service = f"""\
+apiVersion: v1
+kind: Service
+metadata:
+  name: {slug}-backend
+  namespace: {namespace}
+spec:
+  selector:
+    app: {slug}-backend
+  ports:
+    - port: {backend_port}
+      targetPort: {backend_port}
+  type: ClusterIP
+"""
+
+        frontend_deployment = f"""\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {slug}-frontend
+  namespace: {namespace}
+  labels:
+    app: {slug}-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {slug}-frontend
+  template:
+    metadata:
+      labels:
+        app: {slug}-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: {fe_image}
+          ports:
+            - containerPort: {frontend_port}
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {frontend_port}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+"""
+
+        frontend_service = f"""\
+apiVersion: v1
+kind: Service
+metadata:
+  name: {slug}-frontend
+  namespace: {namespace}
+spec:
+  selector:
+    app: {slug}-frontend
+  ports:
+    - port: {frontend_port}
+      targetPort: {frontend_port}
+  type: ClusterIP
+"""
+
+        ingress = f"""\
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {slug}-ingress
+  namespace: {namespace}
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {host}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {slug}-backend
+                port:
+                  number: {backend_port}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {slug}-frontend
+                port:
+                  number: {frontend_port}
+"""
+
+        secrets_template = f"""\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {slug}-secrets
+  namespace: {namespace}
+type: Opaque
+stringData:
+  database-url: "postgresql+asyncpg://postgres:CHANGE_ME@postgres-service:5432/{db_name}"
+"""
+
+        kustomization = f"""\
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - backend-deployment.yaml
+  - backend-service.yaml
+  - frontend-deployment.yaml
+  - frontend-service.yaml
+  - ingress.yaml
+  - secrets.yaml
+namespace: {namespace}
+"""
+
+        logger.info("generate_k8s_manifests: generated 7 manifests for %r (namespace=%s)", project_name, namespace)
+        return {
+            "k8s/backend-deployment.yaml": backend_deployment,
+            "k8s/backend-service.yaml": backend_service,
+            "k8s/frontend-deployment.yaml": frontend_deployment,
+            "k8s/frontend-service.yaml": frontend_service,
+            "k8s/ingress.yaml": ingress,
+            "k8s/secrets.yaml": secrets_template,
+            "k8s/kustomization.yaml": kustomization,
+        }
+
 
 deploy_pipeline = DeployPipeline()
