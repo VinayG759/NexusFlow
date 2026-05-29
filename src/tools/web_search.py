@@ -31,19 +31,18 @@ class WebSearchTool:
     """
 
     def __init__(self) -> None:
-        """Initialise the Tavily client using the configured API key.
+        self._client: TavilyClient | None = None
+        if settings.WEB_SEARCH_API_KEY:
+            self._client = TavilyClient(api_key=settings.WEB_SEARCH_API_KEY)
+        logger.info("WebSearchTool initialised.")
 
-        Raises:
-            ValueError: If ``settings.WEB_SEARCH_API_KEY`` is empty, preventing
-                silent failures at search time.
-        """
-        if not settings.WEB_SEARCH_API_KEY:
+    def _require_client(self) -> TavilyClient:
+        if self._client is None:
             raise ValueError(
                 "WEB_SEARCH_API_KEY is not set. "
                 "Add it to your .env file before using WebSearchTool."
             )
-        self._client = TavilyClient(api_key=settings.WEB_SEARCH_API_KEY)
-        logger.info("WebSearchTool initialised.")
+        return self._client
 
     def search(self, query: str, max_results: int | None = None) -> dict:
         """Perform a web search and return structured results.
@@ -83,7 +82,7 @@ class WebSearchTool:
         logger.info("Searching web for query=%r (max_results=%d)", query, limit)
 
         try:
-            response = self._client.search(query=query, max_results=limit)
+            response = self._require_client().search(query=query, max_results=limit)
             raw_results = response.get("results", [])
             results = [
                 {
