@@ -33,5 +33,8 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-dev.txt
 
+      - name: Verify imports
+        run: python -c "from main import app; print('main import OK')"
+
       - name: Run tests
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=long -p no:warnings
