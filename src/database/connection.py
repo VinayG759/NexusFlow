@@ -52,13 +52,12 @@ _async_url: str = (
     .replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
 )
 
-engine = create_async_engine(
-    _async_url,
-    pool_size=settings.DB_POOL_SIZE,
-    max_overflow=settings.DB_MAX_OVERFLOW,
-    echo=settings.DEBUG,  # logs every SQL statement when DEBUG=true
-    future=True,
-)
+_engine_kwargs: dict = {"echo": settings.DEBUG, "future": True}
+if not _async_url.startswith("sqlite"):
+    _engine_kwargs["pool_size"] = settings.DB_POOL_SIZE
+    _engine_kwargs["max_overflow"] = settings.DB_MAX_OVERFLOW
+
+engine = create_async_engine(_async_url, **_engine_kwargs)
 
 # ── Session factory ───────────────────────────────────────────────────────────
 
