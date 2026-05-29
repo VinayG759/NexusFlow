@@ -28,6 +28,7 @@ from src.agents.ui_design_agent import ui_design_agent
 from src.config.settings import settings
 from src.database.models import Project, ProjectFile
 from src.rag.rag_retriever import rag_retriever
+from src.rag.ui_rules_retriever import mix_rules_for_project, build_design_brief
 from src.tools.api_connector import api_connector
 from src.utils.logger import get_logger
 from src.utils.training_collector import training_collector
@@ -1015,12 +1016,20 @@ class FullProjectGenerator:
         backend_files  = [f for f in processed if not ui_design_agent.is_frontend_file(f.get("path", ""))]
 
         if os.getenv("ANTHROPIC_API_KEY") and frontend_files:
-            logger.info("[%s] Running UIDesignAgent to enhance frontend...", self.agent_name)
+            # Mix a unique design brief from the RAG knowledge base for this build
+            selected_rules = mix_rules_for_project(
+                problem_statement=problem_statement,
+                project_name=project_name,
+            )
+            design_brief = build_design_brief(selected_rules)
+            logger.info("[%s] Running UIDesignAgent with unique design brief...", self.agent_name)
+
             design_result = await ui_design_agent.enhance_frontend(
                 project_name=project_name,
                 problem_statement=problem_statement,
                 existing_frontend_files=frontend_files,
                 reference_context=opts.get("reference_context", ""),
+                design_brief=design_brief,
             )
             if design_result["status"] == "success":
                 frontend_files = design_result["files"]
