@@ -2,7 +2,7 @@
 
 Phases:
   1. Static analysis  — scan files for known anti-patterns without running them.
-  2. Auto-fix         — apply instant fixes; escalate to Claude for the rest.
+  2. Auto-fix         — apply instant fixes; escalate to AI for the rest.
   3. Dependencies     — pip install + npm install, with auto-retry on failure.
   4. Runtime verify   — start uvicorn, health-check it; npm run build frontend.
   5. Report           — return a structured result dict.
@@ -620,9 +620,11 @@ class DebuggingAgent:
         fm = self._fix_fake_packages(fm, fixes)
         fm = self._fix_database_url(fm, fixes)
         fm = self._fix_react_18(fm, fixes)
+        fm = self._fix_react_router_v5(fm, fixes)
         fm = self._fix_pydantic_v2(fm, fixes)
         fm = self._fix_fastapi_db_depends(fm, fixes)
         fm = self._fix_schema_imports(fm, fixes)
+        fm = self._fix_missing_model_imports(fm, fixes)
         fm = self._fix_invalid_model_definition(fm, fixes)
         fm = self._fix_missing_css_imports(fm, issues, fixes)
         fm = self._fix_missing_packages(fm, issues, fixes)
@@ -668,6 +670,23 @@ class DebuggingAgent:
                 path_m = re.match(r"(backend/\S+\.py):", iss)
                 if path_m and not self._BAD_TABLE_REFLECTION_RE.search(fm.get(path_m.group(1), "")):
                     resolved.add(iss)
+            # Generic: "PATH: uses 'SYMBOL' but 'IMPORT_LINE' is missing" — check if now present
+            imp_m = re.match(r"(backend/\S+\.py): uses '(\w+)' but '(.+)' is missing", iss)
+            if imp_m:
+                path_check = imp_m.group(1)
+                symbol_check = imp_m.group(2)
+                import_line_check = imp_m.group(3)
+                content_check = fm.get(path_check, "")
+                module_check = import_line_check.split(" import ")[0].replace("from ", "")
+                if (
+                    import_line_check in content_check
+                    or f"from {module_check} import *" in content_check
+                    or re.search(
+                        rf"from {re.escape(module_check)} import[^\n]*\b{re.escape(symbol_check)}\b",
+                        content_check,
+                    )
+                ):
+                    resolved.add(iss)
         issues = [iss for iss in issues if iss not in resolved]
 
         files = _unmap(fm)
@@ -687,17 +706,17 @@ class DebuggingAgent:
                             db_session, pattern["error_type"], success=True
                         )
 
-        # Claude for unresolved issues
+        # AI for unresolved issues
         already_fixed = {fx[:40] for fx in fixes}
         llm_issues = [
             iss for iss in issues
             if not any(iss[:40] in af for af in already_fixed)
         ]
         if llm_issues and self.api_key:
-            files, claude_fixes = await self._fix_with_claude(
+            files, ai_fixes = await self._fix_with_ai(
                 files, llm_issues, "static analysis issues"
             )
-            fixes.extend(claude_fixes)
+            fixes.extend(ai_fixes)
         elif llm_issues:
             errors.extend(llm_issues)
 
@@ -906,6 +925,109 @@ class DebuggingAgent:
         if new != raw:
             fm[key] = new
             fixes.append("Migrated index.tsx from ReactDOM.render to React 18 createRoot")
+        return fm
+
+    def _fix_react_router_v5(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Migrate React Router v5 syntax to v6 in all frontend TSX/JSX files.
+
+        v5 patterns fixed:
+        - <Switch> → <Routes>
+        - <Route component={X}> → <Route element={<X />}>
+        - <Route exact path=...> → <Route path=...>  (exact is the default in v6)
+        - import { Switch, ... } from 'react-router-dom' → replace Switch with Routes
+        """
+        changed: list[str] = []
+        for path, content in list(fm.items()):
+            if not (path.startswith("frontend/") and path.endswith((".tsx", ".ts", ".jsx", ".js"))):
+                continue
+            if "<Switch>" not in content and "<Switch " not in content:
+                continue
+            orig = content
+
+            # Fix import line: replace Switch with Routes
+            content = re.sub(
+                r"(import\s*\{[^}]*)\bSwitch\b([^}]*\}\s*from\s*['\"]react-router-dom['\"])",
+                lambda m: m.group(0).replace("Switch", "Routes"),
+                content,
+            )
+            # Ensure Routes is in the import (not just renamed Switch)
+            if "Routes" not in content and "react-router-dom" in content:
+                content = re.sub(
+                    r"(from\s*['\"]react-router-dom['\"])",
+                    r"\1",
+                    content,
+                )
+
+            # <Switch> / </Switch> → <Routes> / </Routes>
+            content = re.sub(r"<Switch\b([^>]*)>", r"<Routes\1>", content)
+            content = content.replace("</Switch>", "</Routes>")
+
+            # <Route component={X} ...> → <Route element={<X />} ...>
+            def _upgrade_route(m: re.Match) -> str:
+                tag = m.group(0)
+                # Replace component={X} with element={<X />}
+                tag = re.sub(
+                    r'\bcomponent=\{(\w+)\}',
+                    lambda cm: f'element={{<{cm.group(1)} />}}',
+                    tag,
+                )
+                # Remove exact (it's the default in v6)
+                tag = re.sub(r'\s+exact\b', '', tag)
+                return tag
+
+            content = re.sub(r"<Route\b[^>]*/?>", _upgrade_route, content)
+
+            if content != orig:
+                fm[path] = content
+                changed.append(path)
+
+        if changed:
+            fixes.append(f"Migrated React Router v5 → v6 (Switch→Routes, component→element) in: {', '.join(changed)}")
+        return fm
+
+    def _fix_missing_model_imports(self, fm: dict[str, str], fixes: list[str]) -> dict[str, str]:
+        """Create stub SQLAlchemy model classes in models.py for names imported via 'from models import X'.
+
+        When the AI writes 'from models import User, Task' in routes.py but forgets to
+        generate models.py (or puts the models elsewhere), uvicorn crashes with
+        ModuleNotFoundError. This fixer ensures models.py exists with at least a stub
+        for each referenced class so the import resolves.
+        """
+        models_content = fm.get("backend/models.py", "")
+        defined_in_models: set[str] = set(re.findall(r"^class\s+(\w+)", models_content, re.MULTILINE))
+
+        needed: set[str] = set()
+        for path, content in fm.items():
+            if not (path.startswith("backend/") and path.endswith(".py") and path != "backend/models.py"):
+                continue
+            for m in re.finditer(r"from models import ([^\n]+)", content):
+                for name in [n.strip() for n in m.group(1).split(",") if n.strip()]:
+                    if name and name not in defined_in_models:
+                        needed.add(name)
+
+        if not needed:
+            return fm
+
+        if not models_content.strip():
+            # Create a fresh models.py with standard SQLAlchemy boilerplate
+            models_content = (
+                "from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, Float\n"
+                "from sqlalchemy.orm import Mapped, mapped_column\n"
+                "from database import Base\n"
+                "import datetime\n\n"
+            )
+
+        stubs: list[str] = []
+        for name in sorted(needed):
+            stubs.append(
+                f"\nclass {name}(Base):\n"
+                f'    __tablename__ = "{name.lower()}s"\n'
+                f"    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)\n"
+                f"    name: Mapped[str] = mapped_column(String(255), nullable=False, default='')\n"
+            )
+
+        fm["backend/models.py"] = models_content.rstrip() + "\n" + "\n".join(stubs) + "\n"
+        fixes.append(f"Created stub model(s) in backend/models.py: {sorted(needed)}")
         return fm
 
     # Symbols that belong in `typing`, not `pydantic`
@@ -1972,7 +2094,7 @@ export default function Register() {
                         errors.append(f"Backend startup traceback: {stderr}")
                         crash_diagnosis = await self._diagnose_error(stderr)
                         if self.api_key:
-                            files, cf = await self._fix_with_claude(
+                            files, cf = await self._fix_with_ai(
                                 files, [stderr], "uvicorn startup error"
                             )
                             fixes.extend(cf)
@@ -2033,7 +2155,7 @@ export default function Register() {
                         errors.append(f"Frontend build failed: {' | '.join(brief[:10])}")
 
                     if ts_errors and self.api_key:
-                        files, cf = await self._fix_with_claude(
+                        files, cf = await self._fix_with_ai(
                             files, ts_errors, "TypeScript build errors"
                         )
                         fixes.extend(cf)
@@ -2050,7 +2172,7 @@ export default function Register() {
                             )
                             if retry.returncode == 0:
                                 frontend_status = "built"
-                                fixes.append("Frontend build succeeded after Claude fix")
+                                fixes.append("Frontend build succeeded after AI fix")
             except Exception as exc:
                 frontend_status = "error"
                 errors.append(f"Frontend build exception: {exc}")
@@ -2062,11 +2184,11 @@ export default function Register() {
         return files, backend_status, frontend_status, backend_url, fixes, errors, crash_diagnosis
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Claude-assisted fixing
+    # AI-assisted fixing
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _diagnose_error(self, traceback: str) -> str:
-        """Ask Claude to identify the root cause of a startup traceback in one sentence."""
+        """Ask the AI to identify the root cause of a startup traceback in one sentence."""
         if not self.api_key:
             return ""
         try:
@@ -2125,7 +2247,7 @@ export default function Register() {
             parts.append(f"```\n{code[:1200]}\n```\n\n")
         return "".join(parts)
 
-    async def _fix_with_claude(
+    async def _fix_with_ai(
         self,
         files: list[dict],
         errors: list[str],
@@ -2175,7 +2297,7 @@ export default function Register() {
                     },
                 )
             if resp.status_code != 200:
-                logger.error("%s Claude error %d", self.agent_name, resp.status_code)
+                logger.error("%s AI API error %d", self.agent_name, resp.status_code)
                 return files, []
 
             raw = resp.json()["content"][0]["text"].strip()
@@ -2191,13 +2313,13 @@ export default function Register() {
                 {"path": f["path"], "content": fixed_map.get(f["path"], f["content"])}
                 for f in files
             ]
-            return new_files, [f"Claude fixed: {', '.join(fixed_map.keys())}"]
+            return new_files, [f"AI fixed: {', '.join(fixed_map.keys())}"]
 
         except json.JSONDecodeError as exc:
-            logger.error("%s Claude JSON parse error: %s", self.agent_name, exc)
+            logger.error("%s AI JSON parse error: %s", self.agent_name, exc)
             return files, []
         except Exception as exc:
-            logger.exception("%s Claude exception: %s", self.agent_name, exc)
+            logger.exception("%s AI fix exception: %s", self.agent_name, exc)
             return files, []
 
     # ─────────────────────────────────────────────────────────────────────────

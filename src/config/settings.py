@@ -65,7 +65,7 @@ class Settings(BaseSettings):
 
     WEB_SEARCH_API_KEY: str = ""
     MAX_SEARCH_RESULTS: int = 10
-    # Anthropic Claude API key used by APIConnectorTool to call the LLM.
+    # Anthropic API key used by APIConnectorTool to call the LLM.
     # Obtain from https://console.anthropic.com — never commit the real value.
     ANTHROPIC_API_KEY: str = ""
     # Groq API key used by APIConnectorTool.call_groq() for fast LLM inference.
@@ -77,8 +77,6 @@ class Settings(BaseSettings):
     # ── Deployment ────────────────────────────────────────────────────────────
     GITHUB_TOKEN: str = ""
     GITHUB_USERNAME: str = ""
-    RENDER_API_KEY: str = ""
-    VERCEL_TOKEN: str = ""
 
 
 # Module-level singleton — import this directly instead of instantiating Settings yourself.

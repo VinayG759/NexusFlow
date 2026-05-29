@@ -35,6 +35,7 @@ class Project(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     problem_statement: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(50), default="ready")
+    github_repo: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     setup_instructions: Mapped[str] = mapped_column(Text, default="")
     tech_stack: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)

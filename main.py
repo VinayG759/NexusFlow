@@ -42,7 +42,6 @@ from src.utils.api_analyzer import api_analyzer
 from src.rag.rag_retriever import rag_retriever
 from src.utils.full_project_generator import full_project_generator
 from src.utils.training_collector import training_collector, KNOWN_ERROR_PATTERNS
-from src.utils.training_data import TRAINING_DATA
 
 logger = get_logger(__name__)
 
@@ -109,23 +108,6 @@ async def seed_all_error_patterns(db: AsyncSession) -> None:
     logger.info("Upserted error patterns (total defined: %d)", len(KNOWN_ERROR_PATTERNS))
 
 
-async def seed_all_training_data(db: AsyncSession) -> None:
-    from sqlalchemy import func
-    result = await db.execute(select(func.count()).select_from(TrainingExample))
-    count = result.scalar()
-    if count < len(TRAINING_DATA):
-        for item in TRAINING_DATA:
-            db.add(TrainingExample(
-                input_prompt=item.get("error", ""),
-                error_context=item.get("error_type", ""),
-                correct_output=item.get("fix", ""),
-                example_type=item.get("error_type", "unknown"),
-                quality_score=1.0 if item.get("instant_fix") else 0.8,
-            ))
-        await db.commit()
-        logger.info("Seeded %d training examples", len(TRAINING_DATA))
-
-
 _startup_complete = False
 
 
@@ -135,7 +117,6 @@ async def _background_startup() -> None:
         db = AsyncSessionFactory()
         try:
             await seed_all_error_patterns(db)
-            await seed_all_training_data(db)
         finally:
             await db.close()
         logger.info("Background startup complete")
@@ -211,11 +192,14 @@ async def list_agents() -> dict:
     return {
         "status": "ok",
         "agents": [
-            {"name": "UIDesignAgent",  "type": "UIDesignAgent",  "status": "available"},
-            {"name": "DebuggingAgent", "type": "DebuggingAgent", "status": "available"},
-            {"name": "FileAgent",      "type": "FileAgent",      "status": "available"},
+            {"name": "ProjectGenerator", "type": "ProjectGeneratorAgent", "status": "available"},
+            {"name": "DebuggingAgent",   "type": "DebuggingAgent",        "status": "available"},
+            {"name": "FileAgent",        "type": "FileAgent",             "status": "available"},
+            {"name": "UIDesignAgent",    "type": "UIDesignAgent",         "status": "available"},
+            {"name": "RAGRetriever",     "type": "RAGRetriever",          "status": "available"},
+            {"name": "DeployPipeline",   "type": "DeployPipeline",        "status": "standby"},
         ],
-        "total": 3,
+        "total": 6,
     }
 
 
@@ -234,16 +218,16 @@ async def run_build_job(job_id: str, request: BuildRequest) -> None:
             problem = problem[:3000] + "..."
 
         logger.info("Build job %s started — problem=%r", job_id, problem[:120])
-        _build_jobs[job_id]["progress"] = "Generating project with AI..."
+        _build_jobs[job_id]["progress"] = "Analyzing project requirements..."
 
         db = AsyncSessionFactory()
         try:
-            _build_jobs[job_id]["progress"] = "Running debugging agent..."
+            _build_jobs[job_id]["progress"] = "AI agents generating your project..."
             result = await full_project_generator.generate(
                 problem, options, db,
                 clarifying_answers=request.clarifying_answers or None,
             )
-            _build_jobs[job_id]["progress"] = "Saving to database..."
+            _build_jobs[job_id]["progress"] = "Saving project to database..."
             await db.commit()
         except Exception:
             await db.rollback()
@@ -276,6 +260,11 @@ async def run_build_job(job_id: str, request: BuildRequest) -> None:
 
 @app.post("/build")
 async def build(request: BuildRequest, background_tasks: BackgroundTasks) -> dict:
+    # Trim old jobs to prevent unbounded memory growth
+    if len(_build_jobs) > 150:
+        for old_key in list(_build_jobs.keys())[:50]:
+            del _build_jobs[old_key]
+
     job_id = str(uuid.uuid4())
     _build_jobs[job_id] = {
         "status": "running",
@@ -687,6 +676,7 @@ async def get_projects(db: AsyncSession = Depends(get_db)) -> list[dict]:
             "status": row[0].status,
             "created_at": row[0].created_at.isoformat(),
             "file_count": row[1],
+            "github_repo": row[0].github_repo,
         }
         for row in rows
     ]
@@ -764,13 +754,18 @@ async def deploy_project(project_id: int, db: AsyncSession = Depends(get_db)) ->
 
     files_list = [{"path": f.file_path, "content": f.content} for f in files]
     result = await deploy_pipeline.deploy_project(project.name, files_list)
+    if result.get("github_repo"):
+        project.github_repo = result["github_repo"]
+        await db.commit()
     return result
 
 
 @app.get("/projects/{project_id}/deploy/status")
 async def deploy_status(project_id: int) -> dict:
-    from src.utils.deploy_pipeline import deploy_pipeline
-    return await deploy_pipeline.get_deploy_status(str(project_id))
+    return {
+        "status": "github_only",
+        "message": "Track deployment status via the GitHub repository link returned by the deploy endpoint.",
+    }
 
 
 @app.delete("/projects/{project_id}")
@@ -964,105 +959,6 @@ async def deploy_k8s(
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{safe_name}-k8s.zip"'},
     )
-
-
-# ── Training data endpoints ───────────────────────────────────────────────────
-
-
-@app.get("/training/stats")
-async def get_training_stats(db: AsyncSession = Depends(get_db)) -> dict:
-    return await training_collector.get_training_stats(db)
-
-
-@app.get("/training/examples")
-async def get_training_examples(db: AsyncSession = Depends(get_db)) -> list[dict]:
-    result = await db.execute(
-        select(TrainingExample).order_by(TrainingExample.id.desc()).limit(50)
-    )
-    examples = result.scalars().all()
-    return [
-        {
-            "id": e.id,
-            "input_prompt": e.input_prompt[:100],
-            "example_type": e.example_type,
-            "quality_score": e.quality_score,
-            "created_at": str(e.created_at),
-        }
-        for e in examples
-    ]
-
-
-@app.post("/training/export")
-async def export_training_data(db: AsyncSession = Depends(get_db)) -> StreamingResponse:
-    import io
-    result = await db.execute(
-        select(TrainingExample).where(TrainingExample.quality_score >= 0.8)
-    )
-    examples = result.scalars().all()
-
-    lines = []
-    for e in examples:
-        lines.append(json.dumps({
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are NexusFlow, an expert full-stack developer that generates complete, working FastAPI + React TypeScript applications.",
-                },
-                {"role": "user", "content": e.input_prompt},
-                {"role": "assistant", "content": e.correct_output},
-            ]
-        }))
-
-    content = "\n".join(lines)
-    return StreamingResponse(
-        io.BytesIO(content.encode()),
-        media_type="application/x-ndjson",
-        headers={"Content-Disposition": "attachment; filename=nexusflow_training.jsonl"},
-    )
-
-
-@app.post("/training/export-jsonl")
-async def export_jsonl(db: AsyncSession = Depends(get_db)):
-    from src.utils.finetune_pipeline import finetune_pipeline
-    file_path = await finetune_pipeline.export_training_data(db)
-    validation = finetune_pipeline.validate_jsonl(file_path)
-    return {
-        "file": str(file_path),
-        "validation": validation,
-        "next_step": "POST /training/submit-finetune when ready_for_training=true"
-    }
-
-
-@app.post("/training/submit-finetune")
-async def submit_finetune(db: AsyncSession = Depends(get_db)):
-    from src.utils.finetune_pipeline import finetune_pipeline
-    file_path = await finetune_pipeline.export_training_data(db)
-    result = await finetune_pipeline.submit_to_groq(file_path)
-    return result
-
-
-@app.get("/training/finetune-status/{job_id}")
-async def finetune_status(job_id: str):
-    from src.utils.finetune_pipeline import finetune_pipeline
-    return await finetune_pipeline.check_job_status(job_id)
-
-
-@app.post("/training/activate-model")
-async def activate_model(model_id: str):
-    from src.utils.finetune_pipeline import finetune_pipeline
-    return finetune_pipeline.activate_fine_tuned_model(model_id)
-
-
-@app.post("/training/auto-loop")
-async def training_auto_loop(db: AsyncSession = Depends(get_db)) -> dict:
-    """Export training data, validate, and submit to Groq fine-tuning if ready.
-
-    Returns immediately with ``status: not_ready`` and the recommendation
-    message if the dataset is below the 200-example threshold, or with the
-    Groq submission result if training can proceed.
-    """
-    from src.utils.finetune_pipeline import finetune_pipeline
-    return await finetune_pipeline.auto_loop(db)
 
 
 # ── Setup script helpers ──────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 """API connector tool for NexusFlow.
 
 Provides a shared async HTTP client for generic REST calls and a dedicated
-method for calling the Anthropic Claude API. All network I/O is async so
+method for calling the AI LLM API. All network I/O is async so
 agents can await these methods without blocking the event loop.
 
 Usage::
@@ -12,7 +12,7 @@ Usage::
     result = await api_connector.get("https://api.example.com/data")
     result = await api_connector.post("https://api.example.com/items", payload={"name": "x"})
 
-    # Claude LLM
+    # LLM
     result = await api_connector.call_llm("Summarise this text: ...")
 
     # Shutdown (call once at app teardown)
@@ -72,7 +72,7 @@ class APIConnectorTool:
         logger.info("APIConnectorTool initialised with timeout=%ds.", timeout)
 
     async def call_llm(self, prompt: str, model: str = "claude-3-5-sonnet-20240620", max_tokens: int = 4096) -> dict:
-        """A wrapper to call an LLM, currently configured for Anthropic Claude."""
+        """A wrapper to call an LLM."""
         return await self.call_anthropic(prompt, model, max_tokens)
 
     async def get(
@@ -175,17 +175,17 @@ class APIConnectorTool:
         system_prompt: str | None = None,
         model: str | None = None,
     ) -> dict:
-        """Call the Anthropic Claude API and return the assistant's response.
+        """Call the Anthropic API and return the assistant's response.
 
         Sends a single user turn with an optional system prompt. Uses
         ``settings.ANTHROPIC_API_KEY`` for authentication and falls back to
         ``settings.DEFAULT_MODEL`` when *model* is not specified.
 
         Args:
-            prompt: The user message text to send to Claude.
+            prompt: The user message text to send to the LLM.
             system_prompt: Optional system-level instruction prepended to the
                 conversation (e.g. ``"You are a code review assistant."``).
-            model: Anthropic model ID to use. Defaults to
+            model: Model ID to use. Defaults to
                 ``settings.DEFAULT_MODEL``.
 
         Returns:
@@ -212,7 +212,7 @@ class APIConnectorTool:
             }
 
         resolved_model = model or settings.DEFAULT_MODEL
-        logger.info("Calling Claude model=%r prompt_len=%d", resolved_model, len(prompt))
+        logger.info("Calling LLM model=%r prompt_len=%d", resolved_model, len(prompt))
 
         headers = {
             "x-api-key": settings.ANTHROPIC_API_KEY,
@@ -233,7 +233,7 @@ class APIConnectorTool:
             )
             if not response.is_success:
                 error_text = response.text
-                logger.error("Claude API error %d: %s", response.status_code, error_text)
+                logger.error("LLM API error %d: %s", response.status_code, error_text)
                 return {
                     "status": "error",
                     "error": f"HTTP {response.status_code}: {error_text}",
@@ -243,7 +243,7 @@ class APIConnectorTool:
             content = data.get("content", [{}])[0].get("text", "")
             usage = data.get("usage", {})
             logger.info(
-                "Claude responded — model=%r input_tokens=%s output_tokens=%s",
+                "LLM responded — model=%r input_tokens=%s output_tokens=%s",
                 data.get("model"), usage.get("input_tokens"), usage.get("output_tokens"),
             )
             return {
@@ -415,24 +415,24 @@ class APIConnectorTool:
                         )
                         return {"status": "error", "error": str(exc)}
 
-        # Try Claude as last resort
-        logger.warning("All Groq models exhausted, trying Claude API fallback...")
-        claude_result = await self._call_claude_fallback(
+        # Try AI fallback as last resort
+        logger.warning("All Groq models exhausted, trying AI API fallback...")
+        ai_result = await self._call_ai_fallback(
             prompt,
             system_prompt or "",
             max_tokens if max_tokens is not None else _GROQ_DEFAULT_MAX_TOKENS,
         )
-        if claude_result["status"] == "success":
-            return claude_result
+        if ai_result["status"] == "success":
+            return ai_result
         return {"status": "error", "error": "All LLMs exhausted"}
 
-    async def _call_claude_fallback(
+    async def _call_ai_fallback(
         self,
         prompt: str,
         system_prompt: str,
         max_tokens: int = 8000,
     ) -> dict:
-        """Use Claude API as fallback when Groq TPD is exhausted."""
+        """Use AI API as fallback when Groq TPD is exhausted."""
         api_key = settings.ANTHROPIC_API_KEY
         if not api_key:
             return {"status": "error", "error": "No ANTHROPIC_API_KEY set"}
@@ -456,17 +456,17 @@ class APIConnectorTool:
                 if response.status_code == 200:
                     data = response.json()
                     content = data["content"][0]["text"]
-                    logger.info("Claude fallback succeeded — model=claude-sonnet-4-20250514")
+                    logger.info("AI fallback succeeded")
                     return {
                         "status": "success",
                         "content": content,
-                        "model_used": "claude-sonnet-fallback",
+                        "model_used": "ai-fallback",
                     }
                 else:
-                    logger.error("Claude fallback error %d: %s", response.status_code, response.text)
-                    return {"status": "error", "error": f"Claude API error: {response.text}"}
+                    logger.error("AI fallback error %d: %s", response.status_code, response.text)
+                    return {"status": "error", "error": f"AI API error: {response.text}"}
         except Exception as exc:
-            logger.exception("Claude fallback failed: %s", exc)
+            logger.exception("AI fallback failed: %s", exc)
             return {"status": "error", "error": str(exc)}
 
     async def close(self) -> None:

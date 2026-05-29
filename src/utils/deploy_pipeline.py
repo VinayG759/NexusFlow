@@ -1,13 +1,11 @@
 """
-NexusFlow One-Click Deployment Pipeline
-Deploys generated projects to GitHub + Render + Vercel automatically.
+NexusFlow Deployment Pipeline
+Pushes generated projects to GitHub automatically.
 """
 
-import httpx
 import base64
 import json
-import os
-import time
+import httpx
 from src.config.settings import settings
 from src.utils.logger import get_logger
 
@@ -84,67 +82,33 @@ export default function Register() {
 class DeployPipeline:
     def __init__(self):
         self.github_token = settings.GITHUB_TOKEN
-        self.render_api_key = settings.RENDER_API_KEY
-        self.vercel_token = settings.VERCEL_TOKEN
         self.github_username = settings.GITHUB_USERNAME
-        logger.info("DeployPipeline initialised")
+        logger.info("DeployPipeline initialised (GitHub-only mode)")
 
     async def deploy_project(self, project_name: str, files: list[dict]) -> dict:
-        """Full deployment pipeline: GitHub → Render → Vercel"""
-        results = {
+        """Push project files to a new GitHub repository."""
+        results: dict = {
             "status": "deploying",
             "github_repo": None,
-            "render_url": None,
-            "vercel_url": None,
             "errors": [],
-            "setup_required": []
         }
 
-        # Ensure Register.tsx is present before pushing (prevents Vercel build failures)
         files = self._ensure_register_stub(files)
 
-        # Step 1: Push to GitHub
         logger.info("DeployPipeline: pushing to GitHub...")
         github_result = await self._push_to_github(project_name, files)
         if github_result["status"] == "success":
             results["github_repo"] = github_result["repo_url"]
+            results["status"] = "success"
             logger.info("DeployPipeline: GitHub push successful: %s", github_result["repo_url"])
         else:
             results["errors"].append(f"GitHub: {github_result['error']}")
-            return {**results, "status": "failed"}
+            results["status"] = "failed"
 
-        # Step 2: Deploy backend to Render
-        logger.info("DeployPipeline: deploying backend to Render...")
-        render_result = await self._deploy_to_render(
-            project_name,
-            github_result["repo_url"],
-            github_result["repo_name"]
-        )
-        if render_result["status"] == "success":
-            results["render_url"] = render_result["url"]
-            if render_result.get("setup_required"):
-                results["setup_required"].extend(render_result["setup_required"])
-        else:
-            results["errors"].append(f"Render: {render_result['error']}")
-
-        # Step 3: Deploy frontend to Vercel
-        logger.info("DeployPipeline: deploying frontend to Vercel...")
-        vercel_result = await self._deploy_to_vercel(
-            project_name,
-            github_result["repo_url"],
-            github_result["repo_name"],
-            results["render_url"] or "http://localhost:8001"
-        )
-        if vercel_result["status"] == "success":
-            results["vercel_url"] = vercel_result["url"]
-        else:
-            results["errors"].append(f"Vercel: {vercel_result['error']}")
-
-        results["status"] = "success" if not results["errors"] else "partial"
         return results
 
     def _ensure_register_stub(self, files: list[dict]) -> list[dict]:
-        """Inject Register.tsx stub if auth is detected but the page is missing."""
+        """Inject a Register.tsx stub if auth is detected but the page is missing."""
         paths = {f.get("path", "") for f in files}
         has_auth = any("auth.py" in p or "AuthContext.tsx" in p for p in paths)
         has_login = any("pages/Login.tsx" in p for p in paths)
@@ -152,35 +116,34 @@ class DeployPipeline:
         if has_auth and has_login and not has_register:
             files = list(files)
             files.append({"path": "frontend/src/pages/Register.tsx", "content": _REGISTER_STUB})
-            logger.info("DeployPipeline: injected Register.tsx stub before GitHub push")
+            logger.info("DeployPipeline: injected Register.tsx stub")
         return files
 
     async def _push_to_github(self, project_name: str, files: list[dict]) -> dict:
-        """Create GitHub repo and push all project files."""
+        """Create a GitHub repo and push all project files."""
         if not self.github_token or not self.github_username:
-            return {"status": "error", "error": "GITHUB_TOKEN or GITHUB_USERNAME not set"}
+            return {"status": "error", "error": "GITHUB_TOKEN or GITHUB_USERNAME not configured in .env"}
 
         repo_name = f"nexusflow-{project_name.lower().replace(' ', '-')}"
         headers = {
             "Authorization": f"token {self.github_token}",
-            "Accept": "application/vnd.github.v3+json"
+            "Accept": "application/vnd.github.v3+json",
         }
 
         async with httpx.AsyncClient(timeout=30) as client:
-            # Create repo
-            create_response = await client.post(
+            # Create repository
+            create_resp = await client.post(
                 "https://api.github.com/user/repos",
                 headers=headers,
                 json={
                     "name": repo_name,
-                    "description": f"Generated by NexusFlow - {project_name}",
+                    "description": f"Generated by NexusFlow — {project_name}",
                     "private": False,
-                    "auto_init": True
-                }
+                    "auto_init": True,
+                },
             )
-
-            if create_response.status_code not in (200, 201, 422):
-                return {"status": "error", "error": f"Failed to create repo: {create_response.text}"}
+            if create_resp.status_code not in (200, 201, 422):
+                return {"status": "error", "error": f"Failed to create repo: {create_resp.text}"}
 
             repo_url = f"https://github.com/{self.github_username}/{repo_name}"
 
@@ -193,27 +156,22 @@ class DeployPipeline:
 
                 encoded = base64.b64encode(content.encode()).decode()
 
-                # Check if file exists (for update)
-                get_response = await client.get(
+                # Fetch existing SHA (for updates)
+                get_resp = await client.get(
                     f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{file_path}",
-                    headers=headers
+                    headers=headers,
                 )
-
-                payload = {
-                    "message": f"Add {file_path}",
-                    "content": encoded
-                }
-
-                if get_response.status_code == 200:
-                    payload["sha"] = get_response.json().get("sha", "")
+                payload: dict = {"message": f"Add {file_path}", "content": encoded}
+                if get_resp.status_code == 200:
+                    payload["sha"] = get_resp.json().get("sha", "")
 
                 await client.put(
                     f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{file_path}",
                     headers=headers,
-                    json=payload
+                    json=payload,
                 )
 
-            # Push TailwindCSS config files if the project uses Tailwind
+            # Push Tailwind config if project uses Tailwind
             index_css = next(
                 (f.get("content", "") for f in files if f.get("path", "").endswith("frontend/src/index.css")),
                 "",
@@ -239,233 +197,28 @@ export default {
                 ]:
                     get_tw = await client.get(
                         f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{tw_path}",
-                        headers=headers
+                        headers=headers,
                     )
-                    tw_payload = {
+                    tw_payload: dict = {
                         "message": f"Add {tw_path}",
-                        "content": base64.b64encode(tw_content.encode()).decode()
+                        "content": base64.b64encode(tw_content.encode()).decode(),
                     }
                     if get_tw.status_code == 200:
                         tw_payload["sha"] = get_tw.json().get("sha", "")
                     await client.put(
                         f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{tw_path}",
                         headers=headers,
-                        json=tw_payload
+                        json=tw_payload,
                     )
-                    logger.info("DeployPipeline: pushed %s to GitHub", tw_path)
+                    logger.info("DeployPipeline: pushed %s", tw_path)
 
-            # Push vercel.json to frontend folder
-            vercel_config = {
-                "buildCommand": "npm run build",
-                "installCommand": "npm install --legacy-peer-deps",
-                "outputDirectory": "dist",
-                "framework": "vite",
-                "rewrites": [
-                    {"source": "/(.*)", "destination": "/index.html"}
-                ]
-            }
-            vercel_json_path = "frontend/vercel.json"
-            get_vj = await client.get(
-                f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{vercel_json_path}",
-                headers=headers
-            )
-            vercel_payload = {
-                "message": "Add vercel.json",
-                "content": base64.b64encode(json.dumps(vercel_config, indent=2).encode()).decode()
-            }
-            if get_vj.status_code == 200:
-                vercel_payload["sha"] = get_vj.json().get("sha", "")
-            await client.put(
-                f"https://api.github.com/repos/{self.github_username}/{repo_name}/contents/{vercel_json_path}",
-                headers=headers,
-                json=vercel_payload
-            )
+            return {"status": "success", "repo_url": repo_url, "repo_name": repo_name}
 
-            return {
-                "status": "success",
-                "repo_url": repo_url,
-                "repo_name": repo_name
-            }
-
-    async def _deploy_to_render(self, project_name: str, repo_url: str, repo_name: str) -> dict:
-        """Deploy backend to Render via API."""
-        if not self.render_api_key:
-            return {"status": "error", "error": "RENDER_API_KEY not set"}
-
-        headers = {
-            "Authorization": f"Bearer {self.render_api_key}",
-            "Content-Type": "application/json"
+    async def get_deploy_status(self, project_id: str) -> dict:
+        return {
+            "status": "github_only",
+            "message": "Project is deployed to GitHub. Check the repository for the latest status.",
         }
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            # Fetch owner ID (required by Render API v1)
-            owners_resp = await client.get("https://api.render.com/v1/owners", headers=headers)
-            if owners_resp.status_code != 200:
-                return {"status": "error", "error": f"Failed to get Render owner ID: {owners_resp.text}"}
-            owners = owners_resp.json()
-            owner_id = owners[0]["owner"]["id"] if owners else None
-            if not owner_id:
-                return {"status": "error", "error": "No Render owner account found"}
-
-            service_name = f"{project_name}-backend-{int(time.time()) % 10000}"
-
-            db_url = os.getenv("DATABASE_URL", "")
-            setup_required = []
-            if not db_url or "localhost" in db_url or "127.0.0.1" in db_url:
-                db_url = ""
-                setup_required = [
-                    "Add DATABASE_URL to Render service environment variables",
-                    "Use a PostgreSQL service from Render, Railway, or Supabase"
-                ]
-                logger.warning("DATABASE_URL contains localhost — skipping for Render deployment")
-
-            env_vars = [{"key": "PYTHON_VERSION", "value": "3.11.9"}]
-            if db_url:
-                env_vars.append({"key": "DATABASE_URL", "value": db_url})
-
-            response = await client.post(
-                "https://api.render.com/v1/services",
-                headers=headers,
-                json={
-                    "type": "web_service",
-                    "name": service_name,
-                    "ownerId": owner_id,
-                    "serviceDetails": {
-                        "env": "python",
-                        "plan": "free",
-                        "region": "oregon",
-                        "branch": "main",
-                        "repo": repo_url,
-                        "buildCommand": "cd backend && pip install -r requirements.txt",
-                        "startCommand": "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT",
-                        "pullRequestPreviewsEnabled": "no",
-                        "envVars": env_vars
-                    }
-                }
-            )
-
-            if response.status_code in (200, 201):
-                data = response.json()
-                service_url = data.get("service", {}).get("serviceDetails", {}).get("url", "")
-                if service_url and not service_url.startswith("http"):
-                    service_url = f"https://{service_url}"
-                return {"status": "success", "url": service_url, "setup_required": setup_required}
-            elif response.status_code == 400 and "already in use" in response.text:
-                list_response = await client.get(
-                    "https://api.render.com/v1/services",
-                    headers=headers,
-                    params={"limit": 20}
-                )
-                if list_response.status_code == 200:
-                    services = list_response.json()
-                    for svc in services:
-                        svc_data = svc.get("service", {})
-                        if project_name.lower().replace(" ", "-") in svc_data.get("name", "").lower():
-                            slug = svc_data.get("serviceDetails", {}).get("url", "")
-                            url = f"https://{slug}" if slug and not slug.startswith("http") else slug
-                            logger.info("Render service already exists: %s", url)
-                            return {"status": "success", "url": url}
-                return {"status": "error", "error": "Service exists but could not find URL"}
-            else:
-                return {"status": "error", "error": f"Render API error: {response.text}"}
-
-    async def _deploy_to_vercel(self, project_name: str, repo_url: str, repo_name: str, backend_url: str) -> dict:
-        """Deploy frontend to Vercel via API (create project → trigger deployment)."""
-        if not self.vercel_token:
-            return {"status": "error", "error": "VERCEL_TOKEN not set"}
-
-        headers = {
-            "Authorization": f"Bearer {self.vercel_token}",
-            "Content-Type": "application/json"
-        }
-
-        project_slug = f"{repo_name}-frontend"
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            # Step 1: Create Vercel project linked to GitHub repo
-            create_resp = await client.post(
-                "https://api.vercel.com/v9/projects",
-                headers=headers,
-                json={
-                    "name": project_slug,
-                    "gitRepository": {
-                        "type": "github",
-                        "repo": f"{self.github_username}/{repo_name}"
-                    },
-                    "rootDirectory": "frontend",
-                    "buildCommand": "npm run build",
-                    "installCommand": "npm install --legacy-peer-deps",
-                    "outputDirectory": "dist",
-                    "ssoProtection": None,
-                    "environmentVariables": [
-                        {
-                            "key": "VITE_API_URL",
-                            "value": backend_url,
-                            "type": "plain",
-                            "target": ["production", "preview", "development"]
-                        }
-                    ]
-                }
-            )
-
-            if create_resp.status_code == 409:
-                # Project already exists — fetch its ID and disable protection
-                get_resp = await client.get(
-                    f"https://api.vercel.com/v9/projects/{project_slug}",
-                    headers=headers
-                )
-                project_id = get_resp.json().get("id", "") if get_resp.status_code == 200 else ""
-                if project_id:
-                    await client.patch(
-                        f"https://api.vercel.com/v9/projects/{project_slug}",
-                        headers=headers,
-                        json={"ssoProtection": None}
-                    )
-            elif create_resp.status_code in (200, 201):
-                project_id = create_resp.json().get("id", "")
-            else:
-                return {"status": "error", "error": f"Vercel project creation error: {create_resp.text}"}
-
-            if not project_id:
-                return {"status": "error", "error": "Could not obtain Vercel project ID"}
-
-            # Step 2: Trigger deployment from GitHub main branch
-            deploy_resp = await client.post(
-                "https://api.vercel.com/v13/deployments",
-                headers=headers,
-                json={
-                    "name": project_slug,
-                    "project": project_id,
-                    "gitSource": {
-                        "type": "github",
-                        "org": self.github_username,
-                        "repo": repo_name,
-                        "ref": "main"
-                    },
-                    "target": "production"
-                }
-            )
-
-            if deploy_resp.status_code in (200, 201):
-                data = deploy_resp.json()
-                url = data.get("url", "")
-                return {"status": "success", "url": f"https://{url}" if url and not url.startswith("http") else url}
-            else:
-                return {"status": "error", "error": f"Vercel deploy error: {deploy_resp.text}"}
-
-    async def get_deploy_status(self, service_id: str) -> dict:
-        """Check deployment status on Render."""
-        if not self.render_api_key:
-            return {"status": "error"}
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
-                f"https://api.render.com/v1/services/{service_id}",
-                headers={"Authorization": f"Bearer {self.render_api_key}"}
-            )
-            if response.status_code == 200:
-                return response.json()
-            return {"status": "error"}
 
     def generate_k8s_manifests(
         self,
@@ -477,17 +230,7 @@ export default {
         frontend_port: int = 80,
         domain: str = "",
     ) -> dict[str, str]:
-        """Generate Kubernetes manifests for a generated full-stack project.
-
-        Returns a dict mapping file path → YAML content for:
-        - k8s/backend-deployment.yaml
-        - k8s/backend-service.yaml
-        - k8s/frontend-deployment.yaml
-        - k8s/frontend-service.yaml
-        - k8s/ingress.yaml
-        - k8s/secrets.yaml   (template only — fill in real values before applying)
-        - k8s/kustomization.yaml
-        """
+        """Generate Kubernetes manifests for a generated full-stack project."""
         slug = project_name.lower().replace("_", "-")
         be_image = backend_image or f"{slug}-backend:latest"
         fe_image = frontend_image or f"{slug}-frontend:latest"

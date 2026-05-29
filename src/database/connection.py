@@ -28,6 +28,7 @@ Usage::
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -133,4 +134,9 @@ async def init_db() -> None:
     logger.info("Initialising database schema...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Safe migration: add github_repo column to existing projects tables
+        if conn.dialect.name == "postgresql":
+            await conn.execute(text(
+                "ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_repo TEXT"
+            ))
     logger.info("Database schema initialised successfully.")

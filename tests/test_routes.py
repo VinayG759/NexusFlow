@@ -34,9 +34,9 @@ async def test_agents(client):
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ok"
-    assert data["total"] == 3
+    assert data["total"] == 6
     names = {a["name"] for a in data["agents"]}
-    assert names == {"UIDesignAgent", "DebuggingAgent", "FileAgent"}
+    assert names == {"ProjectGenerator", "DebuggingAgent", "FileAgent", "UIDesignAgent", "RAGRetriever", "DeployPipeline"}
 
 
 # ── Build endpoints ───────────────────────────────────────────────────────────
@@ -261,16 +261,3 @@ async def test_analyze_reference_requires_url_or_image(client):
     assert r.status_code == 200
     assert r.json()["status"] == "error"
 
-
-# ── Training endpoints ────────────────────────────────────────────────────────
-
-
-async def test_training_stats(client):
-    r = await client.get("/training/stats")
-    assert r.status_code == 200
-
-
-async def test_training_examples(client):
-    r = await client.get("/training/examples")
-    assert r.status_code == 200
-    assert isinstance(r.json(), list)
